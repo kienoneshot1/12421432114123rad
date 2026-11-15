@@ -1,0 +1,478 @@
+-- ==========================================
+-- 0. CHỜ GAME LOAD XONG & CHỌN TEAM HẢI TẶC (Chuẩn vxeze (1).lua)
+-- ==========================================
+repeat task.wait() until game:IsLoaded() and game.Players.LocalPlayer
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local CollectionService = game:GetService("CollectionService")
+local Lighting = game:GetService("Lighting")
+local GuiService = game:GetService("GuiService")
+local VIM = game:GetService("VirtualInputManager")
+
+local LP = Players.LocalPlayer
+local PlayerGui = LP:WaitForChild("PlayerGui")
+
+-- Đợi tắt màn hình LoadingScreen và nạp xong DataLoaded
+repeat task.wait(0.2) until not PlayerGui:FindFirstChild("LoadingScreen")
+repeat task.wait(0.2) until LP:FindFirstChild("DataLoaded")
+
+local CommF = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("CommF_")
+local wOrigin = workspace:WaitForChild("_WorldOrigin")
+
+-- Hàm giả lập bấm nút UI (dự phòng khi SetTeam chưa ăn ngay)
+local function FireButton(btn)
+    pcall(function()
+        btn.Selectable = true
+        GuiService.SelectedObject = btn
+        VIM:SendKeyEvent(true, "Return", false, btn)
+        task.wait(0.05)
+        VIM:SendKeyEvent(false, "Return", false, btn)
+        task.wait(0.05)
+        GuiService.SelectedObject = nil
+    end)
+end
+
+-- Vòng lặp chọn Team Pirates (Hải Tặc) và đợi nhân vật spawn xong
+while LP.Team == nil or not (LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")) do
+    pcall(function()
+        CommF:InvokeServer("SetTeam", "Pirates")
+        local mainGui = PlayerGui:FindFirstChild("Main (minimal)") or PlayerGui:FindFirstChild("Main")
+        if mainGui and mainGui:FindFirstChild("ChooseTeam") and mainGui.ChooseTeam.Visible then
+            FireButton(mainGui.ChooseTeam.Container.Pirates.Frame.TextButton)
+        end
+    end)
+    task.wait(0.5)
+end
+GuiService.SelectedObject = nil
+
+getgenv().AutoRaid13k = true -- Đổi thành false nếu muốn dừng
+
+-- ==========================================
+-- 1. FPS BOOST (Tối ưu CPU/GPU & Xóa VFX Raid)
+-- ==========================================
+local function OptimizeInstance(v)
+    pcall(function()
+        if v:IsA("BasePart") then
+            v.Material = Enum.Material.Plastic
+            v.Reflectance = 0
+            v.CastShadow = false
+        elseif v:IsA("Decal") or v:IsA("Texture") then
+            v.Transparency = 1
+        elseif v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Fire") or v:IsA("Smoke") or v:IsA("Sparkles") or v:IsA("Beam") then
+            v.Enabled = false
+        elseif v:IsA("Explosion") then
+            v.BlastPressure = 1
+            v.BlastRadius = 1
+            v.Visible = false
+        end
+    end)
+end
+
+task.spawn(function()
+    pcall(function()
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+        Lighting.GlobalShadows = false
+        Lighting.FogEnd = 9e9
+        Lighting.Brightness = 0
+        for _, v in ipairs(Lighting:GetChildren()) do
+            if v:IsA("PostEffect") or v:IsA("Sky") or v:IsA("Atmosphere") then
+                v:Destroy()
+            end
+        end
+        workspace.ClientAnimatorThrottling = Enum.ClientAnimatorThrottlingMode.Enabled
+        workspace.InterpolationThrottling = Enum.InterpolationThrottlingMode.Enabled
+        for _, v in ipairs(workspace:GetDescendants()) do
+            OptimizeInstance(v)
+        end
+        workspace.DescendantAdded:Connect(OptimizeInstance)
+    end)
+end)
+
+-- ==========================================
+-- 2. ÉP LOAD BOAT CASTLE & CÁC ĐẢO TỪ XA (LoDPosition)
+-- ==========================================
+local function ForceLoadPos(pos)
+    local p = Instance.new("Part", workspace.CurrentCamera)
+    p.Transparency, p.CanCollide, p.Anchored, p.Size = 1, false, true, Vector3.zero
+    p.CFrame = CFrame.new(pos)
+    CollectionService:AddTag(p, "LoDPosition")
+    return p
+end
+ForceLoadPos(Vector3.new(-5034, 315, -2950))
+
+-- ==========================================
+-- 3. TWEEN TỐC ĐỘ 200 & NOCLIP (Chuẩn vxeze (1).lua)
+-- ==========================================
+local CurrentTween = nil
+local function StopTween()
+    if CurrentTween then
+        pcall(function() CurrentTween:Cancel() end)
+        CurrentTween = nil
+    end
+end
+
+RunService.Stepped:Connect(function()
+    if not getgenv().AutoRaid13k then return end
+    pcall(function()
+        local char = LP.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return end
+        if not hrp:FindFirstChild("FloatForce") then
+            local bv = Instance.new("BodyVelocity")
+            bv.Name = "FloatForce"
+            bv.Velocity = Vector3.zero
+            bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+            bv.P = 10000
+            bv.Parent = hrp
+        end
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and part.CanCollide then
+                part.CanCollide = false
+            end
+        end
+    end)
+end)
+
+local function TweenTo(targetCF)
+    local char = LP.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not (hrp and hum and hum.Health > 0) then return end
+
+    if hum.Sit then hum.Sit = false hum.Jump = true end
+
+    local dist = (hrp.Position - targetCF.Position).Magnitude
+    if dist <= 15 then
+        StopTween()
+        hrp.CFrame = targetCF
+        return
+    end
+
+    StopTween()
+    if dist > 80 then
+        hrp.CFrame = CFrame.new(hrp.Position.X, targetCF.Position.Y, hrp.Position.Z)
+    end
+    CurrentTween = TweenService:Create(
+        hrp,
+        TweenInfo.new(dist / 200, Enum.EasingStyle.Linear),
+        { CFrame = targetCF }
+    )
+    CurrentTween:Play()
+end
+
+-- ==========================================
+-- 4. LẤY FRUIT DƯỚI 1.5M BELI CHUẨN VXEZ (ItemReplicationService + GetFruits)
+-- ==========================================
+local FruitPriceMap = {}
+local function LoadFruitPrices()
+    if next(FruitPriceMap) then return end
+    local ok, data = pcall(function()
+        return CommF:InvokeServer("GetFruits", false)
+    end)
+    if ok and type(data) == "table" then
+        for _, f in pairs(data) do
+            if f.Name and f.Price then
+                FruitPriceMap[f.Name] = tonumber(f.Price)
+            end
+        end
+    end
+end
+
+local function GetCheapestFruitUnder1M5()
+    LoadFruitPrices()
+    local bestName, minPrice = nil, math.huge
+
+    pcall(function()
+        local IRS = require(ReplicatedStorage:WaitForChild("ItemReplicationService"))
+        local IC = require(ReplicatedStorage:WaitForChild("ItemConfig"))
+        local KEYS = IRS.KEYS
+        for _, item in IRS:GetItems(KEYS.QUANTITY) do
+            if item.Value and item.Value > 0 then
+                local ok, cfg = pcall(function() return IC.match(item.ItemId):unwrap() end)
+                if ok and cfg and cfg.Display and cfg.Display.Category == "Blox Fruit" then
+                    local storageKey = (cfg.Index and cfg.Index.StorageKey) or cfg.Display.Name
+                    local price = FruitPriceMap[storageKey] or (cfg.Price and tonumber(cfg.Price)) or 500000
+                    if storageKey and price < 1500000 and price < minPrice then
+                        bestName = storageKey
+                        minPrice = price
+                    end
+                end
+            end
+        end
+    end)
+
+    if not bestName then
+        pcall(function()
+            local inv = CommF:InvokeServer("getInventory")
+            if type(inv) == "table" then
+                for _, item in pairs(inv) do
+                    if item.Type == "Blox Fruit" and item.Name then
+                        local price = tonumber(item.Value) or FruitPriceMap[item.Name] or 500000
+                        if price < 1500000 and price < minPrice then
+                            bestName = item.Name
+                            minPrice = price
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    return bestName
+end
+
+local function HasChip()
+    local char = LP.Character
+    return LP.Backpack:FindFirstChild("Special Microchip") or (char and char:FindFirstChild("Special Microchip"))
+end
+
+local function HasFruitInBag()
+    for _, container in ipairs({ LP.Backpack, LP.Character }) do
+        if container then
+            for _, t in ipairs(container:GetChildren()) do
+                if t:IsA("Tool") and (string.find(t.Name, "Fruit") or t:FindFirstChild("EatRemote")) then
+                    return t
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- ==========================================
+-- 5. FAST ATTACK + BRING MOB + KILL AURA (Chuẩn vxeze (1).lua)
+-- ==========================================
+local Net = require(ReplicatedStorage.Modules.Net)
+local reRegisterAttack = ReplicatedStorage.Modules.Net:WaitForChild("RE/RegisterAttack")
+local RegisterHit = Net:RemoteEvent("RegisterHit", true)
+
+local function FastAttackRaid()
+    pcall(function()
+        local char = LP.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp or (char:FindFirstChild("Stun") and char.Stun.Value ~= 0) then return end
+
+        local hits = {}
+        local addedRig = {}
+
+        for _, mob in ipairs(workspace.Enemies:GetChildren()) do
+            local mHrp = mob:FindFirstChild("HumanoidRootPart")
+            local mHum = mob:FindFirstChildOfClass("Humanoid")
+            if mHrp and mHum and mHum.Health > 0 and (mHrp.Position - hrp.Position).Magnitude <= 85 then
+                local hitPart = mob:FindFirstChild("Head") or mHrp
+                if hitPart and not addedRig[mob] then
+                    table.insert(hits, { mob, hitPart })
+                    addedRig[mob] = true
+                end
+            end
+        end
+
+        if #hits > 0 then
+            local firstHit = table.remove(hits, 1)[2]
+            reRegisterAttack:FireServer(0)
+            RegisterHit:FireServer(firstHit, hits)
+        end
+    end)
+end
+
+task.spawn(function()
+    while task.wait(0.08) do
+        if not getgenv().AutoRaid13k then break end
+        if getgenv().IsFarmingRaidMob then
+            FastAttackRaid()
+        end
+    end
+end)
+
+local function BringAndKillAura(centerMob)
+    pcall(sethiddenproperty, LP, "SimulationRadius", math.huge)
+    if not (centerMob and centerMob:FindFirstChild("HumanoidRootPart")) then return end
+    local targetCF = centerMob.HumanoidRootPart.CFrame
+
+    for _, mob in ipairs(workspace.Enemies:GetChildren()) do
+        local mHrp = mob:FindFirstChild("HumanoidRootPart")
+        local mHum = mob:FindFirstChildOfClass("Humanoid")
+        if mHrp and mHum and mHum.Health > 0 then
+            local dist = (mHrp.Position - targetCF.Position).Magnitude
+            if dist <= 350 then
+                for _, p in ipairs(mob:GetDescendants()) do
+                    if p:IsA("BasePart") and p.CanCollide then p.CanCollide = false end
+                end
+                mHrp.AssemblyLinearVelocity = Vector3.zero
+                mHrp.CFrame = targetCF
+                if not isnetworkowner or isnetworkowner(mHrp) then
+                    pcall(function()
+                        mHum.WalkSpeed = 0
+                        mHum.JumpPower = 0
+                    end)
+                end
+            end
+        end
+    end
+end
+
+local function EquipMeleeAndBuso()
+    local char = LP.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not (char and hum and hum.Health > 0) then return end
+
+    if not char:FindFirstChild("HasBuso") then
+        pcall(function() CommF:InvokeServer("Buso") end)
+    end
+
+    local currentTool = char:FindFirstChildOfClass("Tool")
+    if currentTool and currentTool.ToolTip == "Melee" then return end
+
+    for _, tool in ipairs(LP.Backpack:GetChildren()) do
+        if tool:IsA("Tool") and tool.ToolTip == "Melee" then
+            hum:EquipTool(tool)
+            break
+        end
+    end
+end
+
+-- ==========================================
+-- 6. NHẬN DIỆN ĐẢO RAID 1 -> 5 & TRẠNG THÁI RAID
+-- ==========================================
+local function GetCurrentRaidIsland()
+    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return nil end
+
+    for i = 5, 1, -1 do
+        local islandName = "Island " .. tostring(i)
+        for _, loc in ipairs(wOrigin.Locations:GetChildren()) do
+            if loc.Name == islandName and (loc.Position - hrp.Position).Magnitude < 3000 then
+                return loc
+            end
+        end
+    end
+    return nil
+end
+
+local function IsInsideRaid()
+    local timer = LP.PlayerGui:FindFirstChild("Main")
+        and LP.PlayerGui.Main:FindFirstChild("TopHUDList")
+        and LP.PlayerGui.Main.TopHUDList:FindFirstChild("RaidTimer")
+    if timer and timer.Visible then return true end
+    return GetCurrentRaidIsland() ~= nil
+end
+
+-- ==========================================
+-- 7. VÒNG LẶP AUTO RAID CHÍNH (CHỐNG MUA CHIP LIÊN TỤC + LẶP ĐẾN 13K FRAGS)
+-- ==========================================
+local RaidActionLockUntil = 0
+
+task.spawn(function()
+    while getgenv().AutoRaid13k and task.wait(0.15) do
+        pcall(function()
+            local char = LP.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if not (hrp and hum and hum.Health > 0) then return end
+
+            local frags = LP:FindFirstChild("Data") and LP.Data:FindFirstChild("Fragments") and LP.Data.Fragments.Value or 0
+            local inRaid = IsInsideRaid()
+            local raidIsland = GetCurrentRaidIsland()
+
+            -- 1. Đủ 13,000 Fragments -> Dừng
+            if frags >= 13000 and not inRaid then
+                getgenv().IsFarmingRaidMob = false
+                getgenv().AutoRaid13k = false
+                StopTween()
+                if hrp:FindFirstChild("FloatForce") then hrp.FloatForce:Destroy() end
+                warn("[Auto Raid] Đã đủ " .. tostring(frags) .. " Fragments! Hoàn tất.")
+                return
+            end
+
+            -- 2. Đang trong Raid -> Đánh quái & qua đảo 1 -> 5
+            if inRaid and raidIsland then
+                RaidActionLockUntil = tick() + 8
+
+                local targetMob, minDist = nil, math.huge
+                for _, mob in ipairs(workspace.Enemies:GetChildren()) do
+                    local mHrp = mob:FindFirstChild("HumanoidRootPart")
+                    local mHum = mob:FindFirstChildOfClass("Humanoid")
+                    if mHrp and mHum and mHum.Health > 0 then
+                        local d = (mHrp.Position - hrp.Position).Magnitude
+                        if d < 1500 and d < minDist then
+                            minDist = d
+                            targetMob = mob
+                        end
+                    end
+                end
+
+                if targetMob then
+                    getgenv().IsFarmingRaidMob = true
+                    EquipMeleeAndBuso()
+                    BringAndKillAura(targetMob)
+                    TweenTo(targetMob.HumanoidRootPart.CFrame * CFrame.new(0, 22, 0))
+                else
+                    getgenv().IsFarmingRaidMob = false
+                    TweenTo(CFrame.new(raidIsland.Position + Vector3.new(0, 65, 0)))
+                end
+                return
+            end
+
+            getgenv().IsFarmingRaidMob = false
+
+            -- 3. Đang trong thời gian khóa chờ vào/ra Raid -> Không mua thêm Chip
+            if tick() < RaidActionLockUntil then
+                return
+            end
+
+            -- 4. Ở ngoài Sea 3: Chưa có Chip -> Rút trái < 1.5M & đổi Chip
+            if not HasChip() then
+                local fruitTool = HasFruitInBag()
+                if not fruitTool then
+                    local cheapFruit = GetCheapestFruitUnder1M5()
+                    if cheapFruit then
+                        CommF:InvokeServer("LoadFruit", cheapFruit)
+                        task.wait(0.8)
+                    else
+                        warn("[Auto Raid] Không tìm thấy trái nào dưới 1.5M Beli trong kho!")
+                        task.wait(3)
+                        return
+                    end
+                end
+
+                CommF:InvokeServer("RaidsNpc", "Select", "Flame")
+                task.wait(1)
+            end
+
+            -- 5. Đã có Chip -> Nhét Chip từ xa (hoặc Tween 200 tới nút nếu cần)
+            if HasChip() then
+                local btn = workspace.Map:FindFirstChild("Boat Castle")
+                    and workspace.Map["Boat Castle"]:FindFirstChild("RaidSummon2")
+                    and workspace.Map["Boat Castle"].RaidSummon2:FindFirstChild("Button")
+                    and workspace.Map["Boat Castle"].RaidSummon2.Button:FindFirstChild("Main")
+
+                if not (btn and btn:FindFirstChild("ClickDetector")) then
+                    ForceLoadPos(Vector3.new(-5034, 315, -2950))
+                    task.wait(0.5)
+                    return
+                end
+
+                hum:UnequipTools()
+                fireclickdetector(btn.ClickDetector)
+                task.wait(0.25)
+
+                local chip = HasChip()
+                if chip then
+                    hum:EquipTool(chip)
+                    task.wait(0.15)
+                    fireclickdetector(btn.ClickDetector)
+                end
+
+                RaidActionLockUntil = tick() + 12
+                task.wait(1.2)
+
+                if HasChip() and not IsInsideRaid() and (hrp.Position - btn.Position).Magnitude > 20 then
+                    TweenTo(btn.CFrame * CFrame.new(0, 0, 3))
+                    RaidActionLockUntil = tick() + 1.5
+                end
+            end
+        end)
+    end
+end)
