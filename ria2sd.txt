@@ -3,10 +3,7 @@ local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local TS = game:GetService("TweenService")
-local CS = game:GetService("CollectionService")
 local Lighting = game:GetService("Lighting")
-local GuiService = game:GetService("GuiService")
-local VIM = game:GetService("VirtualInputManager")
 
 local LP = Players.LocalPlayer
 local PGui = LP:WaitForChild("PlayerGui")
@@ -20,99 +17,73 @@ while LP.Team == nil or not (LP.Character and LP.Character:FindFirstChild("Human
     pcall(function()
         CommF:InvokeServer("SetTeam", "Pirates")
         local m = PGui:FindFirstChild("Main (minimal)") or PGui:FindFirstChild("Main")
-        local btn = m and m:FindFirstChild("ChooseTeam") and m.ChooseTeam.Visible and m.ChooseTeam.Container.Pirates.Frame.TextButton
-        if btn then
-            btn.Selectable = true
-            GuiService.SelectedObject = btn
-            VIM:SendKeyEvent(true, "Return", false, btn)
-            task.wait(0.05)
-            VIM:SendKeyEvent(false, "Return", false, btn)
-            GuiService.SelectedObject = nil
+        local btn = m and m:FindFirstChild("ChooseTeam") and m.ChooseTeam.Container.Pirates.Frame.TextButton
+        if btn and getconnections then
+            for _, conn in pairs(getconnections(btn.Activated)) do conn.Function() end
         end
     end)
     task.wait(0.4)
 end
 
-getgenv().AutoRaid13k = true
-
--- 1. ULTRA FPS BOOST & XÓA VFX ĐÁNH NHAU
-local function StripVFX(v)
+pcall(function() require(RS.Reparent).Unparent = function() end end)
+task.spawn(function()
     pcall(function()
-        if v:IsA("BasePart") then
-            v.Material = Enum.Material.Plastic
-            v.Reflectance = 0
-            v.CastShadow = false
-        elseif v:IsA("Decal") or v:IsA("Texture") or v:IsA("SurfaceAppearance") then
-            v:Destroy()
-        elseif v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Fire") or v:IsA("Smoke") or v:IsA("Sparkles") or v:IsA("Beam") or v:IsA("Highlight") then
-            v:Destroy()
-        elseif v:IsA("Explosion") then
-            v.Visible = false
-            v.BlastPressure = 0
+        local ps = LP:WaitForChild("PlayerScripts", 5)
+        if ps then
+            if ps:FindFirstChild("NewIslandLOD") then ps.NewIslandLOD:Destroy() end
+            if ps:FindFirstChild("IslandLOD") then ps.IslandLOD:Destroy() end
         end
     end)
-end
+end)
+
+getgenv().AutoRaid13k = true
 
 task.spawn(function()
     pcall(function()
         settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
         Lighting.GlobalShadows = false
         Lighting.FogEnd = 9e9
-        Lighting.Brightness = 0
         for _, v in ipairs(Lighting:GetChildren()) do
-            if v:IsA("PostEffect") or v:IsA("Sky") or v:IsA("Atmosphere") then v:Destroy() end
+            if v:IsA("PostEffect") or v:IsA("Atmosphere") then v:Destroy() end
         end
         pcall(function() require(RS.Util.CameraShaker):Stop() end)
-        workspace.ClientAnimatorThrottling = Enum.ClientAnimatorThrottlingMode.Enabled
-        workspace.InterpolationThrottling = Enum.InterpolationThrottlingMode.Enabled
-        for _, v in ipairs(workspace:GetDescendants()) do StripVFX(v) end
-        workspace.DescendantAdded:Connect(StripVFX)
-        wOrigin.ChildAdded:Connect(function(c)
-            if c.Name == "DamageCounter" or c.Name == "Foam" or c:IsA("ParticleEmitter") or c:IsA("BasePart") and c.Name ~= "Island 1" and not string.find(c.Name, "Island") then
-                task.defer(function() pcall(c.Destroy, c) end)
+        for _, v in ipairs(workspace:GetDescendants()) do
+            if v:IsA("BasePart") then
+                v.Material = Enum.Material.Plastic
+                v.Reflectance = 0
+                v.CastShadow = false
+            elseif v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Fire") or v:IsA("Smoke") or v:IsA("Sparkles") then
+                v.Enabled = false
+            elseif v:IsA("Decal") or v:IsA("Texture") then
+                v.Transparency = 1
             end
-        end)
+        end
     end)
 end)
 
-local function ForceLoadPos(pos)
-    local p = Instance.new("Part", workspace.CurrentCamera)
-    p.Transparency, p.CanCollide, p.Anchored, p.Size = 1, false, true, Vector3.zero
-    p.CFrame = CFrame.new(pos)
-    CS:AddTag(p, "LoDPosition")
-end
-ForceLoadPos(Vector3.new(-5034, 315, -2950))
-
--- 2. TWEEN, NÉ CHIÊU BOSS & HỒI MÁU (Chuẩn vxeze (1).lua)
-local CurrentTween, CurrentTargetMob, DodgeUntil, LowHealth = nil, nil, 0, false
-
+local CurrentTween = nil
 local function StopTween()
     if CurrentTween then pcall(function() CurrentTween:Cancel() end) CurrentTween = nil end
 end
 
-workspace.Enemies.DescendantAdded:Connect(function(desc)
-    if not getgenv().AutoRaid13k or not CurrentTargetMob then return end
-    if desc.Name == "BodyGyro" or desc.Name == "BodyPosition" or string.find(desc.Name, "Blast") then
-        if desc:IsDescendantOf(CurrentTargetMob) then
-            DodgeUntil = tick() + 1.6
-        end
-    end
-end)
-
 RunService.Stepped:Connect(function()
     if not getgenv().AutoRaid13k then return end
     pcall(function()
+        if PGui:FindFirstChild("Main") and PGui.Main:FindFirstChild("DamageCounter") then
+            PGui.Main.DamageCounter.Enabled = false
+        end
+        if PGui:FindFirstChild("Notifications") then
+            PGui.Notifications.Enabled = false
+        end
         local char = LP.Character
         local hrp = char and char:FindFirstChild("HumanoidRootPart")
         local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if not (hrp and hum) then return end
-
-        local hpPct = hum.MaxHealth > 0 and (hum.Health / hum.MaxHealth) or 1
-        if hpPct < 0.42 then LowHealth = true elseif hpPct > 0.78 then LowHealth = false end
+        if not (hrp and hum and hum.Health > 0) then return end
+        if hum.Sit then hum.Sit = false end
 
         if not hrp:FindFirstChild("FloatForce") then
             local bv = Instance.new("BodyVelocity", hrp)
-            bv.Name, bv.Velocity, bv.MaxForce, bv.P = "FloatForce", Vector3.zero, Vector3.new(1e5, 1e5, 1e5), 15000
+            bv.Name, bv.Velocity, bv.MaxForce, bv.P = "FloatForce", Vector3.zero, Vector3.new(1e5, 1e5, 1e5), 10000
         end
         hrp.AssemblyLinearVelocity = Vector3.zero
         for _, part in ipairs(char:GetDescendants()) do
@@ -121,15 +92,14 @@ RunService.Stepped:Connect(function()
     end)
 end)
 
-local function TweenTo(targetCF, speed)
+local function TweenTo(targetCF)
     local char = LP.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local hum = char and char:FindFirstChildOfClass("Humanoid")
     if not (hrp and hum and hum.Health > 0) then return end
-    if hum.Sit then hum.Sit = false hum.Jump = true end
 
     local dist = (hrp.Position - targetCF.Position).Magnitude
-    if dist <= 18 then
+    if dist <= 12 then
         StopTween()
         hrp.CFrame = targetCF
         return
@@ -138,11 +108,10 @@ local function TweenTo(targetCF, speed)
     if dist > 60 then
         hrp.CFrame = CFrame.new(hrp.Position.X, targetCF.Position.Y, hrp.Position.Z)
     end
-    CurrentTween = TS:Create(hrp, TweenInfo.new(dist / (speed or 250), Enum.EasingStyle.Linear), { CFrame = targetCF })
+    CurrentTween = TS:Create(hrp, TweenInfo.new(dist / 200, Enum.EasingStyle.Linear), { CFrame = targetCF })
     CurrentTween:Play()
 end
 
--- 3. RÚT FRUIT < 1.5M BELI
 local FruitPrices = {}
 local function GetCheapFruit()
     if not next(FruitPrices) then
@@ -169,7 +138,7 @@ local function GetCheapFruit()
     if not best then
         pcall(function()
             for _, v in pairs(CommF:InvokeServer("getInventory") or {}) do
-                if v.Type == "Blox Fruit" and v.Name then
+                if (v.Type == "Blox Fruit" or string.find(tostring(v.Name), "-")) and v.Name then
                     local p = tonumber(v.Value) or FruitPrices[v.Name] or 500000
                     if p < 1500000 and p < minP then best, minP = v.Name, p end
                 end
@@ -193,7 +162,7 @@ local function HasFruit()
     end
 end
 
--- 4. SUPER FAST ATTACK & BRING MOB (Không dùng Kill Aura lỗi)
+local CombatUtil = require(RS.Modules.CombatUtil)
 local Net = require(RS.Modules.Net)
 local RegAttack = RS.Modules.Net:WaitForChild("RE/RegisterAttack")
 local RegHit = Net:RemoteEvent("RegisterHit", true)
@@ -203,7 +172,6 @@ task.spawn(function()
         if not getgenv().AutoRaid13k then break end
         if getgenv().IsFarmingRaidMob then
             pcall(function()
-                _G.tapCooldown = 0
                 local char = LP.Character
                 local hrp = char and char:FindFirstChild("HumanoidRootPart")
                 if not hrp or (char:FindFirstChild("Stun") and char.Stun.Value ~= 0) then return end
@@ -212,46 +180,69 @@ task.spawn(function()
                 for _, mob in ipairs(workspace.Enemies:GetChildren()) do
                     local mHrp = mob:FindFirstChild("HumanoidRootPart")
                     local mHum = mob:FindFirstChildOfClass("Humanoid")
-                    if mHrp and mHum and mHum.Health > 0 and (mHrp.Position - hrp.Position).Magnitude <= 80 then
-                        table.insert(hits, { mob, mob:FindFirstChild("Head") or mHrp })
+                    if mHrp and mHum and mHum.Health > 0 and (mHrp.Position - hrp.Position).Magnitude <= 75 then
+                        local hitPart = mob:FindFirstChild("Head") or mHrp
+                        if not CombatUtil or CombatUtil:IsVulnerable(mob) then
+                            table.insert(hits, { mob, hitPart })
+                        end
                     end
                 end
                 if #hits > 0 then
-                    local mainPart = table.remove(hits, 1)[2]
+                    local firstPart = table.remove(hits, 1)[2]
                     RegAttack:FireServer(0)
-                    RegHit:FireServer(mainPart, hits)
+                    RegHit:FireServer(firstPart, hits)
                 end
             end)
         end
     end
 end)
 
-local function BringMobs(centerMob)
+local function BringMobsToPoint(pullPos)
     pcall(sethiddenproperty, LP, "SimulationRadius", math.huge)
-    local cHrp = centerMob and centerMob:FindFirstChild("HumanoidRootPart")
-    if not cHrp then return end
-    local targetCF = cHrp.CFrame
-
     for _, mob in ipairs(workspace.Enemies:GetChildren()) do
         local mHrp = mob:FindFirstChild("HumanoidRootPart")
         local mHum = mob:FindFirstChildOfClass("Humanoid")
-        if mHrp and mHum and mHum.Health > 0 and (mHrp.Position - targetCF.Position).Magnitude <= 350 then
-            pcall(function()
-                for _, p in ipairs(mob:GetChildren()) do
-                    if p:IsA("BasePart") then p.CanCollide = false end
-                end
-                mHum.WalkSpeed = 0
-                mHum.JumpPower = 0
-                if mob ~= centerMob then
-                    mHrp.CFrame = targetCF
-                end
-                mHrp.AssemblyLinearVelocity = Vector3.zero
-            end)
+        if mHrp and mHum and mHum.Health > 0 and (mHrp.Position - pullPos).Magnitude <= 350 then
+            if not string.find(mob.Name, "Master") and mHum.MaxHealth < 45000 then
+                pcall(function()
+                    for _, p in ipairs(mob:GetChildren()) do
+                        if p:IsA("BasePart") and p.CanCollide then p.CanCollide = false end
+                    end
+                    mHum.WalkSpeed = 0
+                    mHum.JumpPower = 0
+                    mHum.AutoRotate = false
+                    mHum.PlatformStand = true
+                    mHrp.AssemblyLinearVelocity = Vector3.zero
+                    mHrp.AssemblyAngularVelocity = Vector3.zero
+
+                    local att = mHrp:FindFirstChild("dutditattach")
+                    if not att then
+                        att = Instance.new("Attachment", mHrp)
+                        att.Name = "dutditattach"
+                        local ap = Instance.new("AlignPosition", att)
+                        ap.Name = "dutditaglin"
+                        ap.Attachment0 = att
+                        ap.Mode = Enum.PositionAlignmentMode.OneAttachment
+                        ap.MaxForce = 1000000
+                        ap.MaxVelocity = 350
+                        ap.Responsiveness = 40
+                        local ao = Instance.new("AlignOrientation", att)
+                        ao.Name = "dutditorient"
+                        ao.Attachment0 = att
+                        ao.Mode = Enum.OrientationAlignmentMode.OneAttachment
+                        ao.MaxTorque = 1000000
+                        ao.Responsiveness = 40
+                    end
+                    local ap = att:FindFirstChild("dutditaglin")
+                    if ap then ap.Position = pullPos end
+                    mHrp.CFrame = CFrame.new(pullPos)
+                end)
+            end
         end
     end
 end
 
-local LastBuffTime = 0
+local LastBuff = 0
 local function EquipAndBuff()
     local char = LP.Character
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -264,10 +255,10 @@ local function EquipAndBuff()
         end
     end
 
-    if tick() - LastBuffTime > 1.5 then
-        LastBuffTime = tick()
+    if tick() - LastBuff > 2 then
+        LastBuff = tick()
         if not char:FindFirstChild("HasBuso") then pcall(function() CommF:InvokeServer("Buso") end) end
-        pcall(function() CommE:FireServer("ActivateAbility") end) -- Bật Tộc V3 (Water Body giảm 80% sát thương)
+        pcall(function() CommE:FireServer("ActivateAbility") end)
         local awk = LP.Backpack:FindFirstChild("Awakening") or char:FindFirstChild("Awakening")
         if awk and awk:FindFirstChild("RemoteFunction") then
             pcall(function() awk.RemoteFunction:InvokeServer(true) end)
@@ -275,7 +266,6 @@ local function EquipAndBuff()
     end
 end
 
--- 5. NHẬN DIỆN RAID & VÒNG LẶP CHÍNH
 local function GetRaidIsland()
     local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
     if not hrp then return nil end
@@ -292,9 +282,11 @@ local function IsInsideRaid()
 end
 
 local RaidLockUntil = 0
+local AnchorPos = nil
+local OrbitAngle = 0
 
 task.spawn(function()
-    while getgenv().AutoRaid13k and task.wait(0.03) do
+    while getgenv().AutoRaid13k and task.wait(0.05) do
         pcall(function()
             local char = LP.Character
             local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -315,53 +307,84 @@ task.spawn(function()
 
             if inRaid and raidIsl then
                 RaidLockUntil = tick() + 8
-                local bestMob, minDist = nil, math.huge
+                local bossMob, nearestMob, minDist = nil, nil, math.huge
+
                 for _, mob in ipairs(workspace.Enemies:GetChildren()) do
                     local mHrp = mob:FindFirstChild("HumanoidRootPart")
                     local mHum = mob:FindFirstChildOfClass("Humanoid")
                     if mHrp and mHum and mHum.Health > 0 then
-                        local d = (mHrp.Position - hrp.Position).Magnitude
-                        if d < 1500 and d < minDist then bestMob, minDist = mob, d end
+                        local d = (mHrp.Position - raidIsl.Position).Magnitude
+                        if d < 1500 then
+                            if string.find(mob.Name, "Master") or mHum.MaxHealth >= 45000 then
+                                bossMob = mob
+                            end
+                            local distToPlr = (mHrp.Position - hrp.Position).Magnitude
+                            if distToPlr < minDist then
+                                nearestMob, minDist = mob, distToPlr
+                            end
+                        end
                     end
                 end
 
-                CurrentTargetMob = bestMob
-                if bestMob then
+                local target = bossMob or nearestMob
+                if target then
+                    getgenv().IsFarmingRaidMob = true
                     EquipAndBuff()
-                    BringMobs(bestMob)
-                    -- Nếu máu thấp (<42%) -> Bay lên Y+220 hồi máu; nếu Boss tung skill -> Né Y+110; bình thường đứng Y+35
-                    local offsetY = LowHealth and 220 or (tick() < DodgeUntil and 110 or 35)
-                    getgenv().IsFarmingRaidMob = not LowHealth
-                    TweenTo(bestMob.HumanoidRootPart.CFrame * CFrame.new(0, offsetY, 0), 260)
+
+                    if bossMob then
+                        AnchorPos = bossMob.HumanoidRootPart.Position
+                        BringMobsToPoint(AnchorPos)
+                        OrbitAngle = (OrbitAngle + 35) % 360
+                        local rad = math.rad(OrbitAngle)
+                        local standPos = AnchorPos + Vector3.new(math.cos(rad) * 18, 28, math.sin(rad) * 18)
+                        TweenTo(CFrame.new(standPos))
+                    else
+                        local hasMobNearAnchor = false
+                        if AnchorPos then
+                            for _, mob in ipairs(workspace.Enemies:GetChildren()) do
+                                local mHrp = mob:FindFirstChild("HumanoidRootPart")
+                                local mHum = mob:FindFirstChildOfClass("Humanoid")
+                                if mHrp and mHum and mHum.Health > 0 and (mHrp.Position - AnchorPos).Magnitude <= 320 then
+                                    hasMobNearAnchor = true
+                                    break
+                                end
+                            end
+                        end
+                        if not hasMobNearAnchor then
+                            AnchorPos = target.HumanoidRootPart.Position
+                        end
+                        BringMobsToPoint(AnchorPos)
+                        TweenTo(CFrame.new(AnchorPos + Vector3.new(0, 22, 0)))
+                    end
                 else
                     getgenv().IsFarmingRaidMob = false
-                    TweenTo(CFrame.new(raidIsl.Position + Vector3.new(0, 45, 0)), 260)
+                    AnchorPos = nil
+                    TweenTo(CFrame.new(raidIsl.Position + Vector3.new(0, 50, 0)))
                 end
                 return
             end
 
             getgenv().IsFarmingRaidMob = false
-            CurrentTargetMob = nil
+            AnchorPos = nil
             if tick() < RaidLockUntil then return end
 
             if not HasChip() then
                 if not HasFruit() then
                     local f = GetCheapFruit()
-                    if f then CommF:InvokeServer("LoadFruit", f) task.wait(0.7) else task.wait(2) return end
+                    if f then CommF:InvokeServer("LoadFruit", f) task.wait(0.8) else task.wait(2) return end
                 end
                 CommF:InvokeServer("RaidsNpc", "Select", "Flame")
-                task.wait(0.8)
+                task.wait(1)
             end
 
             if HasChip() then
-                local btn = workspace.Map:FindFirstChild("Boat Castle")
-                    and workspace.Map["Boat Castle"]:FindFirstChild("RaidSummon2")
-                    and workspace.Map["Boat Castle"].RaidSummon2:FindFirstChild("Button")
-                    and workspace.Map["Boat Castle"].RaidSummon2.Button:FindFirstChild("Main")
+                local boatCastle = workspace.Map:FindFirstChild("Boat Castle") or workspace:FindFirstChild("Boat Castle")
+                local btn = boatCastle and boatCastle:FindFirstChild("RaidSummon2")
+                    and boatCastle.RaidSummon2:FindFirstChild("Button")
+                    and boatCastle.RaidSummon2.Button:FindFirstChild("Main")
 
                 if not (btn and btn:FindFirstChild("ClickDetector")) then
-                    ForceLoadPos(Vector3.new(-5034, 315, -2950))
-                    task.wait(0.4)
+                    TweenTo(CFrame.new(-5034, 315, -2950))
                     return
                 end
 
@@ -371,15 +394,15 @@ task.spawn(function()
                 local chip = HasChip()
                 if chip then
                     hum:EquipTool(chip)
-                    task.wait(0.1)
+                    task.wait(0.15)
                     fireclickdetector(btn.ClickDetector)
                 end
 
                 RaidLockUntil = tick() + 12
-                task.wait(1)
+                task.wait(1.2)
                 if HasChip() and not IsInsideRaid() and (hrp.Position - btn.Position).Magnitude > 20 then
-                    TweenTo(btn.CFrame * CFrame.new(0, 0, 3), 200)
-                    RaidLockUntil = tick() + 1.2
+                    TweenTo(btn.CFrame * CFrame.new(0, 0, 3))
+                    RaidLockUntil = tick() + 1.5
                 end
             end
         end)
