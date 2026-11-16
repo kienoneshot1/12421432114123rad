@@ -1,410 +1,1559 @@
-repeat task.wait() until game:IsLoaded() and game.Players.LocalPlayer
+-- AUTO RAID / BNN extracted raid with embedded source for teleport persistence
+local PAYLOAD = [====[
+-- AUTO RAID | BNN extracted raid functions | syntax repair
+--[[
+  BNN AUTO RAID - STANDALONE
+  Extracted/adapted from the supplied bnn.lua: Marines selection, raids,
+  low-price stored fruit, server-hop, fast attack and bring mob.
+  All code is embedded in the final .lua; no remote UI library is loaded.
+  Requires a Blox Fruits-capable executor (CommF_, fireclickdetector,
+  VirtualInputManager). queue_on_teleport is optional for restart after hopping.
+]]
+
+local CFG = {
+    Raid = "Flame",               -- change to Ice, Light, Magma, Buddha, etc.
+    Weapon = "Melee",             -- Melee | Sword | Blox Fruit | Gun
+    FruitPriceLimit = 2000000,   -- STRICTLY BELOW 2,000,000 Beli
+    GetCheapStoredFruit = true,
+    TryBeliWhenNoFruit = true,
+    HopBeforeBeli = false,       -- buy chip with Beli first if no eligible fruit
+    HopWhenOutOfFruit = true,
+    PickWorldFruit = true,
+    FastAttack = true,
+    AutoBuso = true,
+    BringMob = true,
+    FPSBoost = true,
+    HideMapVisuals = false,        -- extreme FPS mode; preserve colliders and touch triggers
+    AutoAwaken = false,          -- BNN's optional Awakener: Check + Awaken
+    TweenSpeed = 310,
+    AttackDistance = 80,
+    HopCooldown = 15,
+    BuyCooldown = 7,
+    ServerScanPages = 20,
+    MaxMobsToBring = 6,
+    TickDelay = 0.17,
+}
+
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
+local WS = game:GetService("Workspace")
+local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
-local TS = game:GetService("TweenService")
-local Lighting = game:GetService("Lighting")
+local VIM = game:GetService("VirtualInputManager")
+local GuiService = game:GetService("GuiService")
+local Http = game:GetService("HttpService")
+local LP = Players.LocalPlayer or Players.PlayerAdded:Wait()
+local ENV = (type(getgenv) == "function" and getgenv()) or _G
 
-local LP = Players.LocalPlayer
-local PGui = LP:WaitForChild("PlayerGui")
-repeat task.wait(0.2) until not PGui:FindFirstChild("LoadingScreen") and LP:FindFirstChild("DataLoaded")
-
-local CommF = RS:WaitForChild("Remotes"):WaitForChild("CommF_")
-local CommE = RS:WaitForChild("Remotes"):WaitForChild("CommE")
-local wOrigin = workspace:WaitForChild("_WorldOrigin")
-
-while LP.Team == nil or not (LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")) do
-    pcall(function()
-        CommF:InvokeServer("SetTeam", "Pirates")
-        local m = PGui:FindFirstChild("Main (minimal)") or PGui:FindFirstChild("Main")
-        local btn = m and m:FindFirstChild("ChooseTeam") and m.ChooseTeam.Container.Pirates.Frame.TextButton
-        if btn and getconnections then
-            for _, conn in pairs(getconnections(btn.Activated)) do conn.Function() end
-        end
-    end)
-    task.wait(0.4)
+local function try(fn, ...)
+    local ok, result = pcall(fn, ...)
+    return ok and result or nil
 end
 
-pcall(function() require(RS.Reparent).Unparent = function() end end)
-task.spawn(function()
-    pcall(function()
-        local ps = LP:WaitForChild("PlayerScripts", 5)
-        if ps then
-            if ps:FindFirstChild("NewIslandLOD") then ps.NewIslandLOD:Destroy() end
-            if ps:FindFirstChild("IslandLOD") then ps.IslandLOD:Destroy() end
-        end
-    end)
-end)
+if type(ENV.__BNNRAID_CONFIG_JSON) == "string" then
+    local overrides = try(function() return Http:JSONDecode(ENV.__BNNRAID_CONFIG_JSON) end)
+    if type(overrides) == "table" then
+        for k, v in pairs(overrides) do if CFG[k] ~= nil then CFG[k] = v end end
+    end
+end
+if type(ENV.BNNRaidConfig) == "table" then
+    for k, v in pairs(ENV.BNNRaidConfig) do if CFG[k] ~= nil then CFG[k] = v end end
+end
 
-getgenv().AutoRaid13k = true
+if ENV.__BNN_RAID_RUNNING then
+    warn("[BNN Raid] Script already running. Use the existing top status UI.")
+    return
+end
+ENV.__BNN_RAID_RUNNING = true
+local RUNNING = true
+local STARTED_AT = tick()
+local PAUSED = false
+local PHASE = "Initializing"
+local ERR = ""
+local HOPS = tonumber(ENV.__BNN_RAID_HOPS) or 0
+local visited = type(ENV.__BNN_RAID_VISITED) == "table" and ENV.__BNN_RAID_VISITED or {}
+visited[tostring(game.JobId)] = true
+local Comm = RS:WaitForChild("Remotes", 25) and RS.Remotes:WaitForChild("CommF_", 25)
+if not Comm then
+    warn("[BNN Raid] CommF_ missing")
+    ENV.__BNN_RAID_RUNNING = nil
+    return
+end
 
-task.spawn(function()
-    pcall(function()
-        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
-        Lighting.GlobalShadows = false
-        Lighting.FogEnd = 9e9
-        for _, v in ipairs(Lighting:GetChildren()) do
-            if v:IsA("PostEffect") or v:IsA("Atmosphere") then v:Destroy() end
-        end
-        pcall(function() require(RS.Util.CameraShaker):Stop() end)
-        for _, v in ipairs(workspace:GetDescendants()) do
-            if v:IsA("BasePart") then
-                v.Material = Enum.Material.Plastic
-                v.Reflectance = 0
-                v.CastShadow = false
-            elseif v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Fire") or v:IsA("Smoke") or v:IsA("Sparkles") then
-                v.Enabled = false
-            elseif v:IsA("Decal") or v:IsA("Texture") then
-                v.Transparency = 1
+local function invoke(...)
+    local args = { ... }
+    return try(function() return Comm:InvokeServer(unpack(args)) end)
+end
+local function setStatus(s, e)
+    PHASE = tostring(s)
+    if e then ERR = tostring(e) end
+end
+local function character()
+    local ch = LP.Character
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    local root = ch and ch:FindFirstChild("HumanoidRootPart")
+    return ch, hum, root
+end
+local function distFrom(pos)
+    local _, _, root = character()
+    return root and (root.Position - pos).Magnitude or math.huge
+end
+local function hasItem(name)
+    local ch = LP.Character
+    return (ch and ch:FindFirstChild(name) ~= nil)
+        or (LP:FindFirstChild("Backpack") and LP.Backpack:FindFirstChild(name) ~= nil)
+end
+local function heldFruit()
+    for _, folder in ipairs({ LP:FindFirstChild("Backpack"), LP.Character }) do
+        if folder then
+            for _, item in ipairs(folder:GetChildren()) do
+                if item:IsA("Tool") and item.Name:find("Fruit") then return item end
             end
         end
-    end)
-end)
-
-local CurrentTween = nil
-local function StopTween()
-    if CurrentTween then pcall(function() CurrentTween:Cancel() end) CurrentTween = nil end
+    end
+end
+local function alive(mob)
+    local hum = mob and mob:FindFirstChildOfClass("Humanoid")
+    return hum and hum.Health > 0 and mob:FindFirstChild("HumanoidRootPart") ~= nil
 end
 
-RunService.Stepped:Connect(function()
-    if not getgenv().AutoRaid13k then return end
-    pcall(function()
-        if PGui:FindFirstChild("Main") and PGui.Main:FindFirstChild("DamageCounter") then
-            PGui.Main.DamageCounter.Enabled = false
-        end
-        if PGui:FindFirstChild("Notifications") then
-            PGui.Notifications.Enabled = false
-        end
-        local char = LP.Character
-        local hrp = char and char:FindFirstChild("HumanoidRootPart")
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if not (hrp and hum and hum.Health > 0) then return end
-        if hum.Sit then hum.Sit = false end
-
-        if not hrp:FindFirstChild("FloatForce") then
-            local bv = Instance.new("BodyVelocity", hrp)
-            bv.Name, bv.Velocity, bv.MaxForce, bv.P = "FloatForce", Vector3.zero, Vector3.new(1e5, 1e5, 1e5), 10000
-        end
-        hrp.AssemblyLinearVelocity = Vector3.zero
-        for _, part in ipairs(char:GetDescendants()) do
-            if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end
-        end
-    end)
-end)
-
-local function TweenTo(targetCF)
-    local char = LP.Character
-    local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not (hrp and hum and hum.Health > 0) then return end
-
-    local dist = (hrp.Position - targetCF.Position).Magnitude
-    if dist <= 12 then
-        StopTween()
-        hrp.CFrame = targetCF
-        return
-    end
-    StopTween()
-    if dist > 60 then
-        hrp.CFrame = CFrame.new(hrp.Position.X, targetCF.Position.Y, hrp.Position.Z)
-    end
-    CurrentTween = TS:Create(hrp, TweenInfo.new(dist / 200, Enum.EasingStyle.Linear), { CFrame = targetCF })
-    CurrentTween:Play()
-end
-
-local FruitPrices = {}
-local function GetCheapFruit()
-    if not next(FruitPrices) then
-        local ok, data = pcall(function() return CommF:InvokeServer("GetFruits", false) end)
-        if ok and type(data) == "table" then
-            for _, f in pairs(data) do if f.Name and f.Price then FruitPrices[f.Name] = tonumber(f.Price) end end
-        end
-    end
-    local best, minP = nil, math.huge
-    pcall(function()
-        local IRS = require(RS:WaitForChild("ItemReplicationService"))
-        local IC = require(RS:WaitForChild("ItemConfig"))
-        for _, item in IRS:GetItems(IRS.KEYS.QUANTITY) do
-            if item.Value and item.Value > 0 then
-                local ok, cfg = pcall(function() return IC.match(item.ItemId):unwrap() end)
-                if ok and cfg and cfg.Display and cfg.Display.Category == "Blox Fruit" then
-                    local key = (cfg.Index and cfg.Index.StorageKey) or cfg.Display.Name
-                    local p = FruitPrices[key] or tonumber(cfg.Price) or 500000
-                    if key and p < 1500000 and p < minP then best, minP = key, p end
-                end
-            end
-        end
-    end)
-    if not best then
-        pcall(function()
-            for _, v in pairs(CommF:InvokeServer("getInventory") or {}) do
-                if (v.Type == "Blox Fruit" or string.find(tostring(v.Name), "-")) and v.Name then
-                    local p = tonumber(v.Value) or FruitPrices[v.Name] or 500000
-                    if p < 1500000 and p < minP then best, minP = v.Name, p end
-                end
+-- 1. BNN's Marines join: CommF_ SetTeam + ChooseTeam GUI fallback.
+local function joinMarines()
+    if LP.Team and LP.Team.Name == "Marines" then return true end
+    local start = tick()
+    repeat
+        invoke("SetTeam", "Marines")
+        try(function()
+            local pg = LP:FindFirstChild("PlayerGui")
+            local main = pg and (pg:FindFirstChild("Main (minimal)") or pg:FindFirstChild("Main"))
+            local choose = main and main:FindFirstChild("ChooseTeam", true)
+            local frame = choose and choose.Visible and choose:FindFirstChild("Marines", true)
+            local button = frame and (frame:FindFirstChildWhichIsA("TextButton", true)
+                or frame:FindFirstChildWhichIsA("ImageButton", true))
+            if button then
+                button.Selectable = true
+                GuiService.SelectedObject = button
+                VIM:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+                VIM:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+                GuiService.SelectedObject = nil
             end
         end)
+        if LP.Team and LP.Team.Name == "Marines" then return true end
+        task.wait(.25)
+    until tick() - start > 12
+    return LP.Team and LP.Team.Name == "Marines" or false
+end
+
+try(function()
+    local vu = game:GetService("VirtualUser")
+    LP.Idled:Connect(function()
+        vu:Button2Down(Vector2.zero, WS.CurrentCamera.CFrame)
+        task.wait(1)
+        vu:Button2Up(Vector2.zero, WS.CurrentCamera.CFrame)
+    end)
+end)
+
+-- 2. FPS boost: remove visual-only nodes, NOT Workspace/Map, collisions,
+--    triggers, player physics, NPCs, fruit handles or raid locations.
+local function visualOnly(node)
+    if node:IsA("Decal") or node:IsA("Texture") or node:IsA("SurfaceAppearance")
+        or node:IsA("ParticleEmitter") or node:IsA("Trail") or node:IsA("Beam")
+        or node:IsA("Fire") or node:IsA("Smoke") or node:IsA("Sparkles") then
+        node:Destroy()
+    elseif node:IsA("BasePart") then
+        node.Material = Enum.Material.SmoothPlastic
+        node.Reflectance = 0
+        node.CastShadow = false
+        -- "Delete Workspace" visuals without actually deleting physical objects:
+        -- even collidable map parts stay in Workspace and keep collision/physics.
+        local map = WS:FindFirstChild("Map")
+        if CFG.HideMapVisuals and map and node.Anchored and node:IsDescendantOf(map) then
+            node.LocalTransparencyModifier = 1
+        end
+    elseif node:IsA("PointLight") or node:IsA("SpotLight") or node:IsA("SurfaceLight") then
+        node.Enabled = false
+    end
+end
+local function fpsBoost()
+    if not CFG.FPSBoost then return end
+    setStatus("FPS Boost - preserving physics")
+    try(function()
+        local terrain = WS.Terrain
+        terrain.WaterWaveSize = 0
+        terrain.WaterWaveSpeed = 0
+        terrain.WaterReflectance = 0
+        if CFG.HideMapVisuals then terrain.WaterTransparency = 1 end
+        game:GetService("Lighting").GlobalShadows = false
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+        for _, fx in ipairs(game:GetService("Lighting"):GetChildren()) do
+            if fx:IsA("PostEffect") then fx.Enabled = false end
+        end
+    end)
+    local roots = { WS:FindFirstChild("Map"), WS:FindFirstChild("_WorldOrigin"), WS:FindFirstChild("Effects") }
+    for _, folder in ipairs(roots) do
+        if folder then
+            for n, obj in ipairs(folder:GetDescendants()) do
+                if n % 250 == 0 then task.wait() end
+                try(visualOnly, obj)
+            end
+        end
+    end
+    -- Streams new map decorations may appear after teleport or raid start.
+    local map = WS:FindFirstChild("Map")
+    if map then map.DescendantAdded:Connect(function(obj) if RUNNING then try(visualOnly, obj) end end) end
+    local fx = WS:FindFirstChild("Effects")
+    if fx then fx.DescendantAdded:Connect(function(obj) if RUNNING then try(visualOnly, obj) end end) end
+end
+
+-- 3. Small status UI, top center, no external UI scripts.
+local gui = Instance.new("ScreenGui")
+gui.Name = "BNN_AutoRaid_Standalone_UI"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+local parentUI = (type(gethui) == "function" and try(gethui)) or try(function() return game:GetService("CoreGui") end)
+if parentUI then
+    local ok = pcall(function()
+        local older = parentUI:FindFirstChild(gui.Name)
+        if older then older:Destroy() end
+        gui.Parent = parentUI
+    end)
+    if not ok then parentUI = nil end
+end
+if not parentUI then
+    parentUI = LP:WaitForChild("PlayerGui")
+    local older = parentUI:FindFirstChild(gui.Name)
+    if older then older:Destroy() end
+    gui.Parent = parentUI
+end
+local panel = Instance.new("Frame")
+panel.Name = "StatusPanel"
+panel.AnchorPoint = Vector2.new(.5, 0)
+panel.Position = UDim2.new(.5, 0, 0, 19)
+panel.Size = UDim2.fromOffset(450, 154)
+panel.BackgroundColor3 = Color3.fromRGB(12, 16, 23)
+panel.BackgroundTransparency = .07
+panel.BorderSizePixel = 0
+panel.Parent = gui
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(0, 9)
+corner.Parent = panel
+local stroke = Instance.new("UIStroke")
+stroke.Color = Color3.fromRGB(40, 111, 163)
+stroke.Thickness = 1
+stroke.Parent = panel
+local function label(y, size, color, bold)
+    local t = Instance.new("TextLabel")
+    t.Size = UDim2.new(1, -20, 0, size)
+    t.Position = UDim2.new(0, 10, 0, y)
+    t.BackgroundTransparency = 1
+    t.TextColor3 = color
+    t.Font = bold and Enum.Font.GothamBold or Enum.Font.GothamMedium
+    t.TextSize = bold and 13 or 11
+    t.TextXAlignment = Enum.TextXAlignment.Left
+    t.TextTruncate = Enum.TextTruncate.AtEnd
+    t.Text = "Loading..."
+    t.Parent = panel
+    return t
+end
+local head = label(8, 20, Color3.fromRGB(110, 213, 255), true)
+local stateLabel = label(30, 18, Color3.fromRGB(243, 244, 248), true)
+local infoLabel = label(53, 16, Color3.fromRGB(187, 202, 215))
+local fruitLabel = label(74, 16, Color3.fromRGB(187, 202, 215))
+local errorLabel = label(96, 14, Color3.fromRGB(255, 186, 126))
+head.Text = "AUTO RAID"
+stateLabel.Text = "STATUS  Starting..."
+infoLabel.Text = "Raid: " .. tostring(CFG.Raid) .. " | Initializing"
+fruitLabel.Text = "Chip: checking | Fruit (<2M): checking"
+errorLabel.Text = "Aura: checking | Fast Attack | Bring Mob"
+local raidLabel = label(118, 16, Color3.fromRGB(152, 165, 185))
+raidLabel.Text = "Level: checking"
+panel.Size = UDim2.fromOffset(450, 142)
+
+-- 4. BNN's ItemReplicationService inventory and GetFruits price catalogue.
+local ItemReplicationService = try(function() return require(RS:WaitForChild("ItemReplicationService", 15)) end)
+local ItemConfig = try(function() return require(RS:WaitForChild("ItemConfig", 15)) end)
+local PriceByStorageName = {}
+local lastPriceFetch = 0
+local lastInventoryCheck = 0
+local cachedCheapCount = 0
+local cachedCheapName = nil
+local function refreshFruitPrices()
+    if next(PriceByStorageName) and tick() - lastPriceFetch < 240 then return end
+    local catalog = invoke("GetFruits", false)
+    if type(catalog) ~= "table" then return end
+    local updated = {}
+    for _, fruit in pairs(catalog) do
+        if type(fruit) == "table" and type(fruit.Name) == "string" and tonumber(fruit.Price) then
+            updated[fruit.Name] = tonumber(fruit.Price)
+        end
+    end
+    if next(updated) then PriceByStorageName = updated; lastPriceFetch = tick() end
+end
+local function priceFor(name)
+    local direct = PriceByStorageName[name]
+    if direct then return direct end
+    local lowercase = string.lower(tostring(name or ""))
+    for key, value in pairs(PriceByStorageName) do
+        if string.lower(key) == lowercase then return value end
+    end
+end
+local function cheapStoredFruit(force)
+    if not CFG.GetCheapStoredFruit then return nil, 0 end
+    if not force and tick() - lastInventoryCheck < 2 then return cachedCheapName, cachedCheapCount end
+    lastInventoryCheck = tick()
+    refreshFruitPrices()
+    local best, bestPrice, amount = nil, math.huge, 0
+    if not ItemReplicationService or not ItemConfig then return nil, 0 end
+    try(function()
+        local keys = ItemReplicationService.KEYS
+        for _, entry in ItemReplicationService:GetItems(keys.QUANTITY) do
+            if entry and tonumber(entry.Value) and entry.Value > 0 then
+                local ok, meta = pcall(function() return ItemConfig.match(entry.ItemId):unwrap() end)
+                if ok and meta and meta.Display and meta.Display.Category == "Blox Fruit" then
+                    local name = (meta.Index and meta.Index.StorageKey) or meta.Display.Name
+                    local price = priceFor(name)
+                    -- < 2M: never consume unknown-price or expensive stored fruits.
+                    if price and price < CFG.FruitPriceLimit then
+                        amount += entry.Value
+                        if price < bestPrice then best, bestPrice = name, price end
+                    end
+                end
+            end
+        end
+    end)
+    cachedCheapName, cachedCheapCount = best, amount
+    return best, amount
+end
+local function worldFruit()
+    local best, distance = nil, math.huge
+    for _, item in ipairs(WS:GetChildren()) do
+        if (item:IsA("Tool") or item:IsA("Model")) and item.Name:find("Fruit") then
+            local handle = item:FindFirstChild("Handle")
+            if handle and handle:IsA("BasePart") then
+                local d = distFrom(handle.Position)
+                if d < distance then distance, best = d, item end
+            end
+        end
     end
     return best
 end
 
-local function HasChip()
-    return LP.Backpack:FindFirstChild("Special Microchip") or (LP.Character and LP.Character:FindFirstChild("Special Microchip"))
-end
-
-local function HasFruit()
-    for _, c in ipairs({ LP.Backpack, LP.Character }) do
-        if c then
-            for _, t in ipairs(c:GetChildren()) do
-                if t:IsA("Tool") and (string.find(t.Name, "Fruit") or t:FindFirstChild("EatRemote")) then return t end
-            end
-        end
+-- 5. Transport. Tween, short retarget cooldown, client-character noclip only
+-- while moving. Workspace collisions remain untouched.
+local moveTween, moveDestination, lastMove = nil, nil, 0
+local noclip = false
+local collisionCache = {}
+local floatForce = nil
+local function stopMove()
+    if moveTween then try(function() moveTween:Cancel() end) end
+    moveTween, moveDestination = nil, nil
+    noclip = false
+    if floatForce then try(function() floatForce:Destroy() end) end
+    floatForce = nil
+    for part, previous in pairs(collisionCache) do
+        if part and part.Parent then try(function() part.CanCollide = previous end) end
+        collisionCache[part] = nil
     end
 end
-
-local CombatUtil = require(RS.Modules.CombatUtil)
-local Net = require(RS.Modules.Net)
-local RegAttack = RS.Modules.Net:WaitForChild("RE/RegisterAttack")
-local RegHit = Net:RemoteEvent("RegisterHit", true)
-
-task.spawn(function()
-    while task.wait(0.04) do
-        if not getgenv().AutoRaid13k then break end
-        if getgenv().IsFarmingRaidMob then
-            pcall(function()
-                local char = LP.Character
-                local hrp = char and char:FindFirstChild("HumanoidRootPart")
-                if not hrp or (char:FindFirstChild("Stun") and char.Stun.Value ~= 0) then return end
-
-                local hits = {}
-                for _, mob in ipairs(workspace.Enemies:GetChildren()) do
-                    local mHrp = mob:FindFirstChild("HumanoidRootPart")
-                    local mHum = mob:FindFirstChildOfClass("Humanoid")
-                    if mHrp and mHum and mHum.Health > 0 and (mHrp.Position - hrp.Position).Magnitude <= 75 then
-                        local hitPart = mob:FindFirstChild("Head") or mHrp
-                        if not CombatUtil or CombatUtil:IsVulnerable(mob) then
-                            table.insert(hits, { mob, hitPart })
-                        end
-                    end
-                end
-                if #hits > 0 then
-                    local firstPart = table.remove(hits, 1)[2]
-                    RegAttack:FireServer(0)
-                    RegHit:FireServer(firstPart, hits)
-                end
-            end)
+RunService.Stepped:Connect(function()
+    if not RUNNING or not noclip then return end
+    local ch = LP.Character
+    if ch then
+        for _, part in ipairs(ch:GetDescendants()) do
+            if part:IsA("BasePart") then
+                if collisionCache[part] == nil then collisionCache[part] = part.CanCollide end
+                part.CanCollide = false
+            end
         end
     end
 end)
+local function toTarget(cf)
+    if typeof(cf) ~= "CFrame" then return end
+    local ch, hum, root = character()
+    if not root or not hum or hum.Health <= 0 then return end
+    local distance = (cf.Position - root.Position).Magnitude
+    if distance < 7 then
+        stopMove()
+        root.CFrame = cf
+        return
+    end
+    if moveDestination and (moveDestination.Position - cf.Position).Magnitude < 24 and moveTween then return end
+    if tick() - lastMove < .13 then return end
+    lastMove = tick()
+    if moveTween then try(function() moveTween:Cancel() end) end
+    moveDestination = cf
+    noclip = true
+    if not floatForce or not floatForce.Parent then
+        floatForce = Instance.new("BodyVelocity")
+        floatForce.Name = "BNN_RaidFloat"
+        floatForce.MaxForce = Vector3.new(0, math.huge, 0)
+        floatForce.Velocity = Vector3.zero
+        floatForce.Parent = root
+    end
+    local speed = math.max(tonumber(CFG.TweenSpeed) or 310, 50)
+    moveTween = TweenService:Create(root, TweenInfo.new(distance / speed, Enum.EasingStyle.Linear), { CFrame = cf })
+    moveTween:Play()
+end
 
-local function BringMobsToPoint(pullPos)
-    pcall(sethiddenproperty, LP, "SimulationRadius", math.huge)
-    for _, mob in ipairs(workspace.Enemies:GetChildren()) do
-        local mHrp = mob:FindFirstChild("HumanoidRootPart")
-        local mHum = mob:FindFirstChildOfClass("Humanoid")
-        if mHrp and mHum and mHum.Health > 0 and (mHrp.Position - pullPos).Magnitude <= 350 then
-            if not string.find(mob.Name, "Master") and mHum.MaxHealth < 45000 then
-                pcall(function()
-                    for _, p in ipairs(mob:GetChildren()) do
-                        if p:IsA("BasePart") and p.CanCollide then p.CanCollide = false end
-                    end
-                    mHum.WalkSpeed = 0
-                    mHum.JumpPower = 0
-                    mHum.AutoRotate = false
-                    mHum.PlatformStand = true
-                    mHrp.AssemblyLinearVelocity = Vector3.zero
-                    mHrp.AssemblyAngularVelocity = Vector3.zero
-
-                    local att = mHrp:FindFirstChild("dutditattach")
-                    if not att then
-                        att = Instance.new("Attachment", mHrp)
-                        att.Name = "dutditattach"
-                        local ap = Instance.new("AlignPosition", att)
-                        ap.Name = "dutditaglin"
-                        ap.Attachment0 = att
-                        ap.Mode = Enum.PositionAlignmentMode.OneAttachment
-                        ap.MaxForce = 1000000
-                        ap.MaxVelocity = 350
-                        ap.Responsiveness = 40
-                        local ao = Instance.new("AlignOrientation", att)
-                        ao.Name = "dutditorient"
-                        ao.Attachment0 = att
-                        ao.Mode = Enum.OrientationAlignmentMode.OneAttachment
-                        ao.MaxTorque = 1000000
-                        ao.Responsiveness = 40
-                    end
-                    local ap = att:FindFirstChild("dutditaglin")
-                    if ap then ap.Position = pullPos end
-                    mHrp.CFrame = CFrame.new(pullPos)
-                end)
+local THIRD_SEA = { [7449423635] = true, [100117331123089] = true }
+local SECOND_SEA = { [4442272183] = true, [79091703265657] = true }
+local function sea()
+    if THIRD_SEA[game.PlaceId] then return 3 end
+    if SECOND_SEA[game.PlaceId] then return 2 end
+    return 1
+end
+local function raidSummon()
+    local map = WS:FindFirstChild("Map")
+    local island = map and (sea() == 3 and map:FindFirstChild("Boat Castle") or map:FindFirstChild("CircleIsland"))
+    local summon = island and (island:FindFirstChild("RaidSummon2") or island:FindFirstChild("RaidSummon"))
+    local button = summon and summon:FindFirstChild("Button")
+    return button and button:FindFirstChild("Main")
+end
+local function newestRaidIsland()
+    local wo = WS:FindFirstChild("_WorldOrigin")
+    local locations = wo and wo:FindFirstChild("Locations")
+    if not locations then return end
+    local latest, num = nil, 0
+    for _, obj in ipairs(locations:GetChildren()) do
+        local n = tonumber(obj.Name:match("^Island (%d+)$"))
+        if n and obj:IsA("BasePart") and distFrom(obj.Position) < 3000 and n > num then
+            latest, num = obj, n
+        end
+    end
+    return latest, num
+end
+local function raidTimerVisible()
+    local pg = LP:FindFirstChild("PlayerGui")
+    local main = pg and (pg:FindFirstChild("Main") or pg:FindFirstChild("Main (minimal)"))
+    local hud = main and main:FindFirstChild("TopHUDList")
+    local timer = hud and hud:FindFirstChild("RaidTimer") or (main and main:FindFirstChild("RaidTimer", true))
+    return timer and timer.Visible or false
+end
+local function findMob()
+    local enemies = WS:FindFirstChild("Enemies")
+    local chosen, nearest = nil, math.huge
+    if enemies then
+        for _, mob in ipairs(enemies:GetChildren()) do
+            if alive(mob) then
+                local d = distFrom(mob.HumanoidRootPart.Position)
+                if d <= 400 and d < nearest then chosen, nearest = mob, d end
             end
         end
     end
+    return chosen
 end
 
-local LastBuff = 0
-local function EquipAndBuff()
-    local char = LP.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if not (char and hum and hum.Health > 0) then return end
+-- 6. Original BNN 3TN Fast Attack extracted from supplied bnn.lua.
+local _FA_Players = game:GetService("Players")
+local _FA_RunService = game:GetService("RunService")
+local _FA_ReplicatedStorage = game:GetService("ReplicatedStorage")
+local _FA_Workspace = game:GetService("Workspace")
+local _FA_VirtualInputManager = game:GetService("VirtualInputManager")
 
-    local tool = char:FindFirstChildOfClass("Tool")
-    if not (tool and tool.ToolTip == "Melee") then
-        for _, t in ipairs(LP.Backpack:GetChildren()) do
-            if t:IsA("Tool") and t.ToolTip == "Melee" then hum:EquipTool(t) break end
-        end
+-- Skull Guitar M1 fix: send a real client mouse click first so the game's
+-- normal gun input path can register the shot. Remote TAP is only a fallback.
+local function _FA_ClickM1()
+	_FA_VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 1)
+	task.wait(0.035)
+	_FA_VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 1)
+end
+local _FA_Player = _FA_Players.LocalPlayer
+local _FA_Modules = _FA_ReplicatedStorage:WaitForChild("Modules")
+local _FA_Net = _FA_Modules:WaitForChild("Net")
+local _FA_RegisterAttack = _FA_Net:WaitForChild("RE/RegisterAttack")
+local _FA_RegisterHit = _FA_Net:WaitForChild("RE/RegisterHit")
+local _FA_ShootGunEvent = _FA_Net:WaitForChild("RE/ShootGunEvent")
+local _FA_GunValidator = _FA_ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("Validator2")
+
+local _FA_AttackConfig = {
+	AttackDistance = 65,
+	AttackMobs = true,
+	AttackPlayers = false,
+	AttackCooldown = 0.05,
+	ComboResetTime = 0.05,
+	MaxCombo = 2,
+	HitboxLimbs = { "RightLowerArm", "RightUpperArm", "LeftLowerArm", "LeftUpperArm", "RightHand", "LeftHand" },
+	AutoClickEnabled = true,
+}
+
+local _FA_FastAttack = {}
+_FA_FastAttack.__index = _FA_FastAttack
+
+function _FA_FastAttack.new()
+	local self = setmetatable({
+		Debounce = 0,
+		ComboDebounce = 0,
+		ShootDebounce = 0,
+		M1Combo = 0,
+		EnemyRootPart = nil,
+		Connections = {},
+		Overheat = { Dragonstorm = { MaxOverheat = 3, Cooldown = 0, TotalOverheat = 0, Distance = 350, Shooting = false } },
+		ShootsPerTarget = { ["Dual Flintlock"] = 2 },
+		SpecialShoots = { ["Skull Guitar"] = "TAP", Bazooka = "Position", Cannon = "Position", Dragonstorm = "Overheat" },
+		ActiveUntil = 0,
+	}, _FA_FastAttack)
+	pcall(function()
+		self.CombatFlags = require(_FA_Modules.Flags).COMBAT_REMOTE_THREAD
+		self.ShootFunction = debug.getupvalues(require(_FA_ReplicatedStorage.Controllers.CombatController).Attack)[9]
+		local LocalScript = _FA_Player:WaitForChild("PlayerScripts"):FindFirstChildOfClass("LocalScript")
+		if LocalScript and getsenv then
+			self.HitFunction = getsenv(LocalScript)._G.SendHitsToServer
+		end
+	end)
+	return self
+end
+
+function _FA_FastAttack:IsEntityAlive(entity)
+	local humanoid = entity and entity:FindFirstChild("Humanoid")
+	return humanoid and humanoid.Health > 0
+end
+
+function _FA_FastAttack:CheckStun(Character, Humanoid, ToolTip)
+	local Stun = Character:FindFirstChild("Stun")
+	local Busy = Character:FindFirstChild("Busy")
+	if Humanoid.Sit and (ToolTip == "Sword" or ToolTip == "Melee" or ToolTip == "Blox Fruit") then
+		return false
+	elseif (Stun and Stun.Value > 0) or (Busy and Busy.Value) then
+		return false
+	end
+	return true
+end
+
+function _FA_FastAttack:GetBladeHits(Character, Distance, IncludePlayers)
+	local Position = Character:GetPivot().Position
+	local BladeHits = {}
+	Distance = Distance or _FA_AttackConfig.AttackDistance
+	self.EnemyRootPart = nil
+
+	local function ProcessTargets(Folder)
+		for _, Enemy in ipairs(Folder:GetChildren()) do
+			pcall(function()
+				if Enemy ~= Character and self:IsEntityAlive(Enemy) then
+					local BasePart = Enemy:FindFirstChild(_FA_AttackConfig.HitboxLimbs[math.random(#_FA_AttackConfig.HitboxLimbs)])
+						or Enemy:FindFirstChild("HumanoidRootPart")
+					if BasePart and (Position - BasePart.Position).Magnitude <= Distance then
+						if not self.EnemyRootPart then
+							self.EnemyRootPart = BasePart
+						else
+							table.insert(BladeHits, { Enemy, BasePart })
+						end
+					end
+				end
+			end)
+		end
+	end
+
+	if _FA_AttackConfig.AttackMobs then
+		pcall(ProcessTargets, _FA_Workspace:WaitForChild("Enemies"))
+	end
+	if IncludePlayers or _FA_AttackConfig.AttackPlayers then
+		pcall(ProcessTargets, _FA_Workspace:WaitForChild("Characters"))
+	end
+	return BladeHits
+end
+
+function _FA_FastAttack:GetClosestEnemy(Character, Distance)
+	self:GetBladeHits(Character, Distance, false)
+	return self.EnemyRootPart
+end
+
+function _FA_FastAttack:GetCombo()
+	local Combo = (tick() - self.ComboDebounce) <= _FA_AttackConfig.ComboResetTime and self.M1Combo or 0
+	Combo = Combo >= _FA_AttackConfig.MaxCombo and 1 or Combo + 1
+	self.ComboDebounce = tick()
+	self.M1Combo = Combo
+	return Combo
+end
+
+function _FA_FastAttack:GetValidator2()
+	if not self.ShootFunction then
+		return nil
+	end
+	local v1 = debug.getupvalue(self.ShootFunction, 15)
+	local v2 = debug.getupvalue(self.ShootFunction, 13)
+	local v3 = debug.getupvalue(self.ShootFunction, 16)
+	local v4 = debug.getupvalue(self.ShootFunction, 17)
+	local v5 = debug.getupvalue(self.ShootFunction, 14)
+	local v6 = debug.getupvalue(self.ShootFunction, 12)
+	local v7 = debug.getupvalue(self.ShootFunction, 18)
+	if not (v1 and v2 and v3 and v4 and v5 and v6 and v7) then
+		return nil
+	end
+	local v8 = v6 * v2
+	local v9 = (v5 * v2 + v6 * v1) % v3
+	v9 = (v9 * v3 + v8) % v4
+	v5 = math.floor(v9 / v3)
+	v6 = v9 - v5 * v3
+	v7 = v7 + 1
+	debug.setupvalue(self.ShootFunction, 15, v1)
+	debug.setupvalue(self.ShootFunction, 13, v2)
+	debug.setupvalue(self.ShootFunction, 16, v3)
+	debug.setupvalue(self.ShootFunction, 17, v4)
+	debug.setupvalue(self.ShootFunction, 14, v5)
+	debug.setupvalue(self.ShootFunction, 12, v6)
+	debug.setupvalue(self.ShootFunction, 18, v7)
+	return math.floor(v9 / v4 * 16777215), v7
+end
+
+function _FA_FastAttack:ShootInTarget(TargetPosition)
+	local Character = _FA_Player.Character
+	if not self:IsEntityAlive(Character) then return end
+	local Equipped = Character:FindFirstChildOfClass("Tool")
+	if not Equipped or Equipped.ToolTip ~= "Gun" then return end
+	local Cooldown = Equipped:FindFirstChild("Cooldown") and Equipped.Cooldown.Value or 0.3
+	if (tick() - self.ShootDebounce) < Cooldown then return end
+	local ShootType = self.SpecialShoots[Equipped.Name] or "Normal"
+
+	-- Skull Guitar needs a normal M1 input on some clients/executors.
+	-- Try the real click path first; only use TAP remote if the click did not
+	-- advance LocalTotalShots, avoiding an accidental double shot.
+	if Equipped.Name == "Skull Guitar" then
+		local BeforeShots = Equipped:GetAttribute("LocalTotalShots") or 0
+		_FA_ClickM1()
+		task.wait(0.025)
+		local AfterShots = Equipped:GetAttribute("LocalTotalShots") or 0
+
+		if AfterShots <= BeforeShots and Equipped:FindFirstChild("RemoteEvent") then
+			Equipped:SetAttribute("LocalTotalShots", BeforeShots + 1)
+			local Validator, Counter = self:GetValidator2()
+			if Validator and Counter then
+				_FA_GunValidator:FireServer(Validator, Counter)
+			end
+			Equipped.RemoteEvent:FireServer("TAP", TargetPosition)
+		end
+
+		self.ShootDebounce = tick()
+		return
+	end
+
+	if ShootType == "Position" or (ShootType == "TAP" and Equipped:FindFirstChild("RemoteEvent")) then
+		Equipped:SetAttribute("LocalTotalShots", (Equipped:GetAttribute("LocalTotalShots") or 0) + 1)
+		local Validator, Counter = self:GetValidator2()
+		if Validator and Counter then
+			_FA_GunValidator:FireServer(Validator, Counter)
+		end
+		if ShootType == "TAP" then
+			Equipped.RemoteEvent:FireServer("TAP", TargetPosition)
+		else
+			_FA_ShootGunEvent:FireServer(TargetPosition)
+		end
+		self.ShootDebounce = tick()
+	else
+		_FA_ClickM1()
+		self.ShootDebounce = tick()
+	end
+end
+
+function _FA_FastAttack:UseNormalClick(Character, Humanoid, Cooldown)
+	local BladeHits = self:GetBladeHits(Character, _FA_AttackConfig.AttackDistance, _FA_AttackConfig.AttackPlayers)
+	if self.EnemyRootPart then
+		_FA_RegisterAttack:FireServer(Cooldown)
+		if self.CombatFlags and self.HitFunction then
+			self.HitFunction(self.EnemyRootPart, BladeHits)
+		else
+			_FA_RegisterHit:FireServer(self.EnemyRootPart, BladeHits)
+		end
+	end
+end
+
+function _FA_FastAttack:UseFruitM1(Character, Equipped, Combo)
+	local BladeHits = self:GetBladeHits(Character, _FA_AttackConfig.AttackDistance, _FA_AttackConfig.AttackPlayers)
+	local Target = self.EnemyRootPart or (BladeHits[1] and BladeHits[1][2])
+	if not Target then return end
+	local Delta = Target.Position - Character:GetPivot().Position
+	if Delta.Magnitude <= 0 then return end
+	Equipped.LeftClickRemote:FireServer(Delta.Unit, Combo)
+end
+
+function _FA_FastAttack:Attack()
+	if not _FA_AttackConfig.AutoClickEnabled or tick() > self.ActiveUntil then return end
+	if (tick() - self.Debounce) < _FA_AttackConfig.AttackCooldown then return end
+	local Character = _FA_Player.Character
+	if not Character or not self:IsEntityAlive(Character) then return end
+	local Humanoid = Character:FindFirstChild("Humanoid")
+	local Equipped = Character:FindFirstChildOfClass("Tool")
+	if not Humanoid or not Equipped then return end
+	local ToolTip = Equipped.ToolTip
+	if not table.find({ "Melee", "Blox Fruit", "Sword", "Gun" }, ToolTip) then return end
+	local Cooldown = Equipped:FindFirstChild("Cooldown") and Equipped.Cooldown.Value or _FA_AttackConfig.AttackCooldown
+	if not self:CheckStun(Character, Humanoid, ToolTip) then return end
+	local Combo = self:GetCombo()
+	Cooldown = Cooldown + (Combo >= _FA_AttackConfig.MaxCombo and 0.05 or 0)
+	self.Debounce = Combo >= _FA_AttackConfig.MaxCombo and ToolTip ~= "Gun" and (tick() + 0.05) or tick()
+	if ToolTip == "Blox Fruit" and Equipped:FindFirstChild("LeftClickRemote") then
+		self:UseFruitM1(Character, Equipped, Combo)
+	elseif ToolTip == "Gun" then
+		local Target = self:GetClosestEnemy(Character, math.max(120, _FA_AttackConfig.AttackDistance))
+		if Target then self:ShootInTarget(Target.Position) end
+	else
+		self:UseNormalClick(Character, Humanoid, Cooldown)
+	end
+end
+
+local _FA_AttackInstance = _FA_FastAttack.new()
+getgenv().BNN3TNFastAttack = _FA_AttackInstance
+
+table.insert(_FA_AttackInstance.Connections, _FA_RunService.Stepped:Connect(function()
+	pcall(function()
+		_FA_AttackInstance:Attack()
+	end)
+end))
+
+AttackFunction = function(Distance)
+	_FA_AttackConfig.AttackDistance = tonumber(Distance) or 65
+	_FA_AttackConfig.AttackPlayers = false
+	_FA_AttackInstance.ActiveUntil = tick() + 0.15
+	pcall(function() _FA_AttackInstance:Attack() end)
+end
+
+-- 7. Raid bring-mob: same-name, nearby mobs; only client-network owned
+-- parts are moved. No anchoring or destruction of NPC physics objects.
+local lastBring = 0
+local function bringMobRaid(target)
+    if not CFG.BringMob or tick() - lastBring < .14 or not alive(target) then return end
+    local _, _, playerRoot = character()
+    local targetRoot = target.HumanoidRootPart
+    if not playerRoot or (playerRoot.Position - targetRoot.Position).Magnitude > 90 then return end
+    lastBring = tick()
+    if type(sethiddenproperty) == "function" then
+        try(function() sethiddenproperty(LP, "SimulationRadius", math.huge) end)
     end
-
-    if tick() - LastBuff > 2 then
-        LastBuff = tick()
-        if not char:FindFirstChild("HasBuso") then pcall(function() CommF:InvokeServer("Buso") end) end
-        pcall(function() CommE:FireServer("ActivateAbility") end)
-        local awk = LP.Backpack:FindFirstChild("Awakening") or char:FindFirstChild("Awakening")
-        if awk and awk:FindFirstChild("RemoteFunction") then
-            pcall(function() awk.RemoteFunction:InvokeServer(true) end)
-        end
-    end
-end
-
-local function GetRaidIsland()
-    local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
-    if not hrp then return nil end
-    for i = 5, 1, -1 do
-        for _, loc in ipairs(wOrigin.Locations:GetChildren()) do
-            if loc.Name == ("Island " .. i) and (loc.Position - hrp.Position).Magnitude < 3000 then return loc end
-        end
-    end
-end
-
-local function IsInsideRaid()
-    local t = PGui:FindFirstChild("Main") and PGui.Main:FindFirstChild("TopHUDList") and PGui.Main.TopHUDList:FindFirstChild("RaidTimer")
-    return (t and t.Visible) or GetRaidIsland() ~= nil
-end
-
-local RaidLockUntil = 0
-local AnchorPos = nil
-local OrbitAngle = 0
-
-task.spawn(function()
-    while getgenv().AutoRaid13k and task.wait(0.05) do
-        pcall(function()
-            local char = LP.Character
-            local hrp = char and char:FindFirstChild("HumanoidRootPart")
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if not (hrp and hum and hum.Health > 0) then return end
-
-            local frags = LP:FindFirstChild("Data") and LP.Data:FindFirstChild("Fragments") and LP.Data.Fragments.Value or 0
-            local inRaid = IsInsideRaid()
-            local raidIsl = GetRaidIsland()
-
-            if frags >= 13000 and not inRaid then
-                getgenv().IsFarmingRaidMob = false
-                getgenv().AutoRaid13k = false
-                StopTween()
-                if hrp:FindFirstChild("FloatForce") then hrp.FloatForce:Destroy() end
-                return
-            end
-
-            if inRaid and raidIsl then
-                RaidLockUntil = tick() + 8
-                local bossMob, nearestMob, minDist = nil, nil, math.huge
-
-                for _, mob in ipairs(workspace.Enemies:GetChildren()) do
-                    local mHrp = mob:FindFirstChild("HumanoidRootPart")
-                    local mHum = mob:FindFirstChildOfClass("Humanoid")
-                    if mHrp and mHum and mHum.Health > 0 then
-                        local d = (mHrp.Position - raidIsl.Position).Magnitude
-                        if d < 1500 then
-                            if string.find(mob.Name, "Master") or mHum.MaxHealth >= 45000 then
-                                bossMob = mob
-                            end
-                            local distToPlr = (mHrp.Position - hrp.Position).Magnitude
-                            if distToPlr < minDist then
-                                nearestMob, minDist = mob, distToPlr
-                            end
-                        end
-                    end
-                end
-
-                local target = bossMob or nearestMob
-                if target then
-                    getgenv().IsFarmingRaidMob = true
-                    EquipAndBuff()
-
-                    if bossMob then
-                        AnchorPos = bossMob.HumanoidRootPart.Position
-                        BringMobsToPoint(AnchorPos)
-                        OrbitAngle = (OrbitAngle + 35) % 360
-                        local rad = math.rad(OrbitAngle)
-                        local standPos = AnchorPos + Vector3.new(math.cos(rad) * 18, 28, math.sin(rad) * 18)
-                        TweenTo(CFrame.new(standPos))
-                    else
-                        local hasMobNearAnchor = false
-                        if AnchorPos then
-                            for _, mob in ipairs(workspace.Enemies:GetChildren()) do
-                                local mHrp = mob:FindFirstChild("HumanoidRootPart")
-                                local mHum = mob:FindFirstChildOfClass("Humanoid")
-                                if mHrp and mHum and mHum.Health > 0 and (mHrp.Position - AnchorPos).Magnitude <= 320 then
-                                    hasMobNearAnchor = true
-                                    break
-                                end
-                            end
-                        end
-                        if not hasMobNearAnchor then
-                            AnchorPos = target.HumanoidRootPart.Position
-                        end
-                        BringMobsToPoint(AnchorPos)
-                        TweenTo(CFrame.new(AnchorPos + Vector3.new(0, 22, 0)))
-                    end
+    local moved = 0
+    local enemies = WS:FindFirstChild("Enemies")
+    if not enemies then return end
+    for _, mob in ipairs(enemies:GetChildren()) do
+        if mob ~= target and mob.Name == target.Name and alive(mob) and moved < CFG.MaxMobsToBring then
+            local root = mob.HumanoidRootPart
+            if (root.Position - targetRoot.Position).Magnitude <= 200 then
+                local owns = false
+                if type(isnetworkowner) == "function" then
+                    owns = try(function() return isnetworkowner(root) end) == true
                 else
-                    getgenv().IsFarmingRaidMob = false
-                    AnchorPos = nil
-                    TweenTo(CFrame.new(raidIsl.Position + Vector3.new(0, 50, 0)))
+                    owns = true -- BNN fallback heuristic if executor has no owner API
+                    local characters = WS:FindFirstChild("Characters")
+                    if characters then
+                        for _, other in ipairs(characters:GetChildren()) do
+                            if other.Name ~= LP.Name and other:FindFirstChild("HumanoidRootPart")
+                                and (other.HumanoidRootPart.Position - root.Position).Magnitude < 300 then
+                                owns = false; break
+                            end
+                        end
+                    end
                 end
-                return
-            end
-
-            getgenv().IsFarmingRaidMob = false
-            AnchorPos = nil
-            if tick() < RaidLockUntil then return end
-
-            if not HasChip() then
-                if not HasFruit() then
-                    local f = GetCheapFruit()
-                    if f then CommF:InvokeServer("LoadFruit", f) task.wait(0.8) else task.wait(2) return end
+                if owns then
+                    root.CanCollide = false
+                    root.AssemblyLinearVelocity = Vector3.zero
+                    root.AssemblyAngularVelocity = Vector3.zero
+                    root.CFrame = targetRoot.CFrame * CFrame.new(0, 0, moved % 3)
+                    moved += 1
                 end
-                CommF:InvokeServer("RaidsNpc", "Select", "Flame")
-                task.wait(1)
             end
+        end
+    end
+end
 
-            if HasChip() then
-                local boatCastle = workspace.Map:FindFirstChild("Boat Castle") or workspace:FindFirstChild("Boat Castle")
-                local btn = boatCastle and boatCastle:FindFirstChild("RaidSummon2")
-                    and boatCastle.RaidSummon2:FindFirstChild("Button")
-                    and boatCastle.RaidSummon2.Button:FindFirstChild("Main")
+-- 8. SERVER HOP (ported from Skider_MM2_Kaitun.lua).
+-- Roblox Public Servers API -> TeleportService:TeleportToPlaceInstance.
+-- No __ServerBrowser dependency. BNN fruit pickup / raid code remains unchanged.
+local hopping = false
+local lastHop = -math.huge
+local TeleportService = game:GetService("TeleportService")
+local failedServers = {}
+local hopFailureCounter = 0
+local teleportStarted = false
+local teleportFailure = nil
 
-                if not (btn and btn:FindFirstChild("ClickDetector")) then
-                    TweenTo(CFrame.new(-5034, 315, -2950))
+local function queueAgain()
+    local queue = (type(queue_on_teleport) == "function" and queue_on_teleport)
+        or (type(syn) == "table" and type(syn.queue_on_teleport) == "function" and syn.queue_on_teleport)
+    if not queue then return false, "executor lacks queue_on_teleport" end
+    if type(ENV.__BNN_RAID_SCRIPT_BODY) ~= "string" then return false, "embedded source unavailable" end
+    local persisted = {}
+    for job in pairs(visited) do
+        persisted[#persisted + 1] = job
+        if #persisted >= 80 then break end
+    end
+    local cfgJSON = Http:JSONEncode(CFG)
+    local idsJSON = Http:JSONEncode(persisted)
+    local script = 'local __source=' .. string.format('%q', ENV.__BNN_RAID_SCRIPT_BODY) .. '\n'
+        .. 'local e=getgenv()\ne.__BNN_RAID_RUNNING=nil\ne.__BNN_RAID_SCRIPT_BODY=__source\n'
+        .. 'e.__BNN_RAID_CONFIG_JSON=' .. string.format('%q', cfgJSON) .. '\n'
+        .. 'local list=game:GetService("HttpService"):JSONDecode(' .. string.format('%q', idsJSON) .. ')\n'
+        .. 'e.__BNN_RAID_VISITED={}\nfor _,id in ipairs(list) do e.__BNN_RAID_VISITED[id]=true end\n'
+        .. 'e.__BNN_RAID_HOPS=' .. tostring(HOPS + 1) .. '\nloadstring(__source)()'
+    return pcall(queue, script)
+end
+
+local function requestServerPage(url, timeout)
+    local req = (type(request) == "function" and request)
+        or (type(http_request) == "function" and http_request)
+        or (type(syn) == "table" and type(syn.request) == "function" and syn.request)
+        or (type(http) == "table" and type(http.request) == "function" and http.request)
+    -- Skider's request() / game:HttpGet() fallback, wrapped so the hop worker
+    -- remains responsive when an executor or API request does not return.
+    local op = {done = false}
+    task.spawn(function()
+        local ok, body, code, headers = pcall(function()
+            if req then
+                local response = req({Url = url, Method = "GET", Headers = {["Cache-Control"] = "no-cache"}})
+                if type(response) ~= "table" then error("invalid HTTP response") end
+                return response.Body, tonumber(response.StatusCode or response.Status) or 0, response.Headers
+            end
+            return game:HttpGet(url), 200, nil
+        end)
+        op.ok, op.body, op.code, op.headers, op.done = ok, body, code, headers, true
+    end)
+    local deadline = os.clock() + (timeout or 12)
+    while RUNNING and not op.done and os.clock() < deadline do task.wait(.1) end
+    if not op.done then return nil, "HTTP request timeout", 0 end
+    if not op.ok then return nil, tostring(op.body), 0 end
+    if op.code == 429 then
+        local h = type(op.headers) == "table" and op.headers or {}
+        local cooldown = math.max(30, tonumber(h["Retry-After"] or h["retry-after"]) or 30)
+        return nil, "HTTP 429 rate limited", cooldown
+    end
+    if op.code ~= 200 and op.code ~= 0 then return nil, "HTTP " .. tostring(op.code), 0 end
+    local valid, data = pcall(Http.JSONDecode, Http, op.body or "")
+    if not valid or type(data) ~= "table" or type(data.data) ~= "table" then
+        return nil, "Invalid public servers response", 0
+    end
+    return data, nil, 0
+end
+
+local function scanPublicServers()
+    local now = os.clock()
+    for id, expireAt in pairs(failedServers) do
+        if expireAt <= now then failedServers[id] = nil end
+    end
+    local base = "https://games.roblox.com/v1/games/" .. tostring(game.PlaceId)
+        .. "/servers/Public?sortOrder=Desc&excludeFullGames=true&limit=100"
+    local cursor, cursors = nil, {}
+    local pool, seen = {}, {}
+    local maxPages = math.clamp(tonumber(CFG.ServerScanPages) or 20, 1, 20)
+    for page = 1, maxPages do
+        if not RUNNING then return pool, "Stopped", 0 end
+        setStatus(string.format("Fruit hop: scanning page %d/%d", page, maxPages))
+        local url = base .. (cursor and ("&cursor=" .. Http:UrlEncode(cursor)) or "")
+        local data, err, cooldown
+        for attempt = 1, 3 do
+            data, err, cooldown = requestServerPage(url, 12)
+            if data then break end
+            if attempt < 3 then
+                local delay = math.max(2 ^ attempt, cooldown or 0)
+                setStatus(string.format("Fruit hop: %s, retry in %ds", tostring(err), delay))
+                task.wait(delay)
+            end
+        end
+        if not data then return pool, err, cooldown end
+        for _, server in ipairs(data.data) do
+            local id = server.id
+            local count, capacity = tonumber(server.playing), tonumber(server.maxPlayers)
+            if type(id) == "string" and id ~= "" and id ~= tostring(game.JobId)
+                and not seen[id] and not visited[id] and not failedServers[id]
+                and count and capacity and count > 0 and count < capacity then
+                seen[id] = true
+                pool[#pool + 1] = {id = id, playing = count, random = math.random()}
+            end
+        end
+        if #pool >= 8 then break end
+        local nextCursor = data.nextPageCursor
+        if type(nextCursor) ~= "string" or nextCursor == "" or cursors[nextCursor] then break end
+        cursors[nextCursor] = true
+        cursor = nextCursor
+        task.wait(.75)
+    end
+    table.sort(pool, function(a, b)
+        if a.playing ~= b.playing then return a.playing > b.playing end
+        return a.random < b.random
+    end)
+    return pool, nil, 0
+end
+
+pcall(function()
+    TeleportService.TeleportInitFailed:Connect(function(player, result, message)
+        if player ~= LP then return end
+        teleportFailure = tostring(message or result or "TeleportInitFailed")
+    end)
+    LP.OnTeleport:Connect(function(state)
+        local name = tostring(state)
+        pcall(function() name = state.Name end)
+        if name == "Failed" then teleportFailure = "OnTeleport Failed"
+        else teleportStarted = true end
+    end)
+end)
+
+local function tryTeleportServer(server)
+    if not RUNNING then return false end
+    teleportStarted, teleportFailure = false, nil
+    -- Like Skider: call TeleportToPlaceInstance directly, not __ServerBrowser.
+    setStatus("Fruit hop: joining server " .. server.id:sub(1, 8))
+    local queued, queueError = queueAgain()
+    if not queued then
+        ERR = "Auto restart unavailable: " .. tostring(queueError)
+        warn("[AUTO RAID / HOP] " .. ERR)
+    end
+    local op = {done = false}
+    task.spawn(function()
+        local ok, err = pcall(function()
+            stopMove()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, server.id, LP)
+        end)
+        op.done, op.ok, op.error = true, ok, err
+    end)
+    local deadline = os.clock() + 15
+    local extended = false
+    while RUNNING and not teleportFailure and os.clock() < deadline do
+        if teleportStarted and not extended then
+            extended = true
+            deadline = os.clock() + 40
+        end
+        if op.done and not op.ok then teleportFailure = tostring(op.error); break end
+        task.wait(.1)
+    end
+    -- Successful teleport leaves this client. Reaching here is a rejected/stalled hop.
+    ERR = teleportFailure or "Teleport not confirmed (timeout)"
+    failedServers[server.id] = os.clock() + 120
+    warn("[AUTO RAID / HOP] " .. ERR)
+    return false
+end
+
+local function hopServer()
+    if hopping or os.clock() - lastHop < CFG.HopCooldown then return end
+    hopping = true
+    lastHop = os.clock()
+    stopMove()
+    task.spawn(function()
+        local ok, reason = pcall(function()
+            setStatus("Fruit hop: finding public servers")
+            local pool, errorMessage, cooldown = scanPublicServers()
+            if errorMessage then
+                ERR = tostring(errorMessage)
+                if #pool == 0 then
+                    setStatus("Fruit hop: scan failed - " .. ERR)
+                    if cooldown and cooldown > 0 then lastHop = os.clock() + cooldown - CFG.HopCooldown end
                     return
                 end
-
-                hum:UnequipTools()
-                fireclickdetector(btn.ClickDetector)
-                task.wait(0.2)
-                local chip = HasChip()
-                if chip then
-                    hum:EquipTool(chip)
-                    task.wait(0.15)
-                    fireclickdetector(btn.ClickDetector)
-                end
-
-                RaidLockUntil = tick() + 12
-                task.wait(1.2)
-                if HasChip() and not IsInsideRaid() and (hrp.Position - btn.Position).Magnitude > 20 then
-                    TweenTo(btn.CFrame * CFrame.new(0, 0, 3))
-                    RaidLockUntil = tick() + 1.5
-                end
             end
+            if #pool == 0 then
+                ERR = "No public servers with free slots"
+                setStatus("Fruit hop: no eligible server")
+                return
+            end
+            for i = 1, math.min(8, #pool) do
+                if not RUNNING then return end
+                if tryTeleportServer(pool[i]) then return end
+                task.wait(1)
+            end
+            hopFailureCounter += 1
+            setStatus("Fruit hop: all candidates failed; retrying")
+        end)
+        if not ok then
+            ERR = tostring(reason)
+            setStatus("Fruit hop error: " .. ERR)
+            warn("[AUTO RAID / HOP] " .. ERR)
+        end
+        hopping = false
+        lastHop = math.max(lastHop, os.clock())
+    end)
+end
+
+-- The original BNN raid source begins below. All full raid helper routines
+-- (including BringMobRaid / DetectMobRaid / CheckInRaid / Auto Raid) are retained.
+-- Supporting functions come from BNN where they are self-contained.
+_BNNStandaloneToTarget = toTarget
+t = LP
+wOrigin = WS:WaitForChild("_WorldOrigin")
+Settings = {
+    ["Auto Raid"] = true,
+    ["Select Raid"] = CFG.Raid,
+    ["Select Weapon"] = CFG.Weapon,
+    ["Bring Mob"] = CFG.BringMob,
+    ["Hop Sever Raid"] = CFG.HopWhenOutOfFruit,
+    ["Get Fruit In Inventory Low Beli"] = true,
+    ["Kill Aura Only Raid And Volcano"] = false,
+}
+getgenv().CheckPlaceId = THIRD_SEA[game.PlaceId] and game.PlaceId or 7449423635
+getgenv().CheckPlaceId2 = SECOND_SEA[game.PlaceId] and game.PlaceId or 4442272183
+local E, l -- BNN's original shared BringMobRaid target-upvalue
+local function SaveSettings(name, value) Settings[name] = value end
+-- No BNN full hub UI is loaded. Exactly the Auto Raid toggle callback runs.
+RaidsSection = {CreateToggle = function(def, callback)
+    if def.Title == "Auto Raid" then callback(true) end
+end}
+function IsMobAlive(K)
+	if
+		K
+		and K.Parent
+		and (K:FindFirstChild("HumanoidRootPart"))
+		and (K:FindFirstChildWhichIsA("Humanoid"))
+		and K.Humanoid.Health > 0
+	then
+		return true
+	end
+end
+function DetectItemPlr(E)
+	if t.Character:FindFirstChild(E) or (t.Backpack:FindFirstChild(E)) then
+		return true
+	end
+end
+function sizepart(E)
+	AttackingMob = E
+	if not E or not E.Parent or not E:FindFirstChild("HumanoidRootPart") then
+		return
+	end
+	if t:DistanceFromCharacter(E.HumanoidRootPart.Position) <= 50 then
+		local l, Q, d = next, E:GetDescendants()
+		for E, E in l, Q, d do
+			if (E:IsA("Part") or (E:IsA("MeshPart"))) and E.CanCollide then
+				E.CanCollide = false
+			end
+		end
+	end
+end
+function DeleteIgnoredMob()
+	for Q, Q in pairs(game:GetService("Workspace").Enemies:GetChildren()) do
+		if Q:IsA("Model") and (Q:FindFirstChild("Ignored")) then
+			Q.Ignored:Destroy()
+		end
+	end
+end
+function isnetworkowner2(Q)
+	local d, I, _ = next, game.Workspace.Characters:GetChildren()
+	for o, o in d, I, _ do
+		if
+			o.Name ~= t.Name
+			and (o:FindFirstChild("HumanoidRootPart"))
+			and (o.HumanoidRootPart.Position - Q.Position).Magnitude <= 300
+		then
+			return false
+		end
+	end
+	return true
+end
+function GetPathFruit()
+	local f, V, Y = next, game.Workspace:GetChildren()
+	for H, H in f, V, Y do
+		if (H:IsA("Tool") or (H:IsA("Model"))) and (string.find(H.Name, "Fruit")) and (H:FindFirstChild("Handle")) then
+			return H
+		end
+	end
+end
+function CheckFruitplr()
+	local f
+	for V, V in pairs(t.Backpack:GetChildren()) do
+		f = if string.find(V.Name, "Fruit") then V.Name else f
+	end
+	for V, V in pairs(t.Character:GetChildren()) do
+		f = if string.find(V.Name, "Fruit") then V.Name else f
+	end
+	return f
+end
+function equiptool(g)
+	if g and (t:FindFirstChild("Backpack")) and (t.Backpack:FindFirstChild(g)) and not t.Character.Humanoid.Sit then
+		t.Character.Humanoid:EquipTool(t.Backpack:FindFirstChild(g))
+	end
+end
+function NameWeapon(g, G)
+	local function m(E)
+		local l, Q, d = next, E:GetChildren()
+		for E, E in l, Q, d do
+			if E:IsA("Tool") and E.ToolTip == g then
+				return G and E or E.Name
+			end
+		end
+	end
+	return m(t.Backpack) or (m(t.Character))
+end
+function UsedualFlock()
+	equiptool(NameWeapon(Settings["Select Weapon"] or "Melee"))
+end
+local function m(E)
+	return t.Character
+		and (t.Character:FindFirstChild("HumanoidRootPart"))
+		and E
+		and (E:FindFirstChild("HumanoidRootPart"))
+		and E.Humanoid.Health > 0
+		and (t.Character.HumanoidRootPart.Position - E.HumanoidRootPart.Position).Magnitude < 70
+end
+getgenv().ClickM1 = function(E, l)
+	if not m(E) then
+		return
+	end
+	if Settings["Select Weapon"] == "Blox Fruit" then
+		if getgenv().UseFruitM1(E) then
+			return
+		end
+	end
+	AttackFunction(l and 80 or 30)
+end
+
+-- Adapted dependencies needed outside the original raid block:
+local V, H =
+	require(game:GetService("ReplicatedStorage"):WaitForChild("ItemReplicationService")),
+	require(game:GetService("ReplicatedStorage"):WaitForChild("ItemConfig"))
+local function B()
+	local C, J = {}, require(game:GetService("ReplicatedStorage"):WaitForChild("ItemReplicationService")).KEYS
+	for F, F in V:GetItems(J.QUANTITY) do
+		if F.Value and F.Value > 0 then
+			local q, c = pcall(function()
+				return H.match(F.ItemId):unwrap()
+			end)
+			if q and c and c.Display then
+				local H, q = c.Display.Category, c.Index and c.Index.StorageKey
+				local D, r =
+					if H == "Blox Fruit"
+						then q or c.Display.Name or "ItemId_" .. F.ItemId
+						else c.Display.Name or q or "ItemId_" .. F.ItemId,
+					V:ReadItem(J.MASTERY, F.ItemId, F.NetworkedUID) or 0
+				table.insert(
+					C,
+					{ Name = D, Type = H, Count = F.Value, Mastery = r, ItemId = F.ItemId, UID = F.NetworkedUID }
+				)
+			end
+		end
+	end
+	return C
+end
+getgenv().tablefruitausea3 = {}
+do
+    local ok, catalog = pcall(function() return Comm:InvokeServer("GetFruits", false) end)
+    if ok and type(catalog) == "table" then
+        for _, f in pairs(catalog) do
+            if type(f) == "table" and type(f.Name) == "string" and tonumber(f.Price) then
+                getgenv().tablefruitausea3[f.Name] = tonumber(f.Price)
+            end
+        end
+    end
+end
+function TakeFruitInventory(_)
+    local best, bestPrice = nil, CFG.FruitPriceLimit
+    for _, fruit in ipairs(B()) do
+        if fruit.Type == "Blox Fruit" then
+            local price = getgenv().tablefruitausea3[fruit.Name]
+            if price and price < bestPrice then
+                best, bestPrice = fruit.Name, price
+            end
+        end
+    end
+    return best
+end
+function HopServer() return hopServer() end
+function toTarget(cf,...)
+    if Settings["Auto Raid"] and not PAUSED then
+        setStatus(CheckInRaid and CheckInRaid() and "Moving / farming raid" or "Raid positioning")
+    end
+    return _BNNStandaloneToTarget(cf)
+end
+-- Keep the exact BNN M1 dispatch and its ranged check.
+-- BNN getgenv().UseFruitM1 is mapped to the embedded attack engine.
+getgenv().UseFruitM1 = function(target)
+    if not target then return false end
+    AttackFunction(CFG.AttackDistance)
+    return true
+end
+local lastAuraCheck = 0
+RunService.Heartbeat:Connect(function()
+    if RUNNING and not PAUSED and tick()-lastAuraCheck > 2 then
+        lastAuraCheck=tick()
+        pcall(function()
+            local ch=LP.Character
+            if ch and not ch:FindFirstChild("HasBuso") and not ch:FindFirstChild("_BusoLayer1",true) then invoke("Buso") end
         end)
     end
 end)
+
+-- ================= ORIGINAL BNN RAID MODULE =================
+getgenv().KillRaidEnemy = function()
+	for b, b in ipairs(game.workspace.Enemies:GetChildren()) do
+		if IsMobAlive(b) then
+			b.Humanoid:ChangeState(Enum.HumanoidStateType.Dead)
+		end
+	end
+end
+getgenv().KillRaidEnemyLowhealth = function()
+	for b, b in ipairs(game.workspace.Enemies:GetChildren()) do
+		if IsMobAlive(b) and b.Humanoid.Health / b.Humanoid.MaxHealth < 0.2 then
+			b.Humanoid.Health = 0
+		end
+	end
+end
+function DetectMobRaid()
+	for b, b in ipairs(game.workspace.Enemies:GetChildren()) do
+		if IsMobAlive(b) and t:DistanceFromCharacter(b.HumanoidRootPart.Position) <= 400 then
+			return b
+		end
+	end
+end
+function BringMobNearst(b)
+	if DaBringMob then
+		delay(0.15, function()
+			getgenv().DaBringMob = false
+		end)
+		return
+	end
+	if l and (t.Character.HumanoidRootPart.Position - b.HumanoidRootPart.Position).Magnitude <= 50 then
+		for y, y in pairs(game:GetService("Workspace").Enemies:GetChildren()) do
+			if
+				y ~= b
+				and not y:FindFirstChild("Ignored")
+				and (IsMobAlive(y))
+				and (isnetworkowner2(y.HumanoidRootPart))
+			then
+				if (y.HumanoidRootPart.Position - l.Position).Magnitude <= 350 then
+					sizepart(y)
+					y.HumanoidRootPart.CFrame = l * CFrame.new(0, math.random(0, 2), math.random(0, 2))
+					getgenv().DaBringMob = true
+				end
+			end
+		end
+	end
+end
+function BringMobRaid(b)
+	if not Settings["Bring Mob"] then
+		return
+	end
+	if b and E ~= b then
+		E = b
+		l = b.HumanoidRootPart.CFrame
+		DeleteIgnoredMob()
+	end
+	if DaBringMob then
+		delay(0.1, function()
+			getgenv().DaBringMob = false
+		end)
+		return
+	end
+	local E = {}
+	if not b:FindFirstChild("Ignored") then
+		table.insert(E, b)
+	end
+	for y, y in pairs(game:GetService("Workspace").Enemies:GetChildren()) do
+		if
+			y ~= b
+			and y.Name == b.Name
+			and not y:FindFirstChild("Ignored")
+			and (IsMobAlive(y))
+			and (isnetworkowner2(y.HumanoidRootPart))
+		then
+			if (y.HumanoidRootPart.Position - l.Position).Magnitude <= 200 and #E < 1 then
+				table.insert(E, y)
+			end
+		end
+	end
+	if
+		l
+		and (t.Character.HumanoidRootPart.Position - b.HumanoidRootPart.Position).Magnitude <= 50
+		and (isnetworkowner2(t.Character.HumanoidRootPart))
+	then
+		for b, b in pairs(E) do
+			sizepart(b)
+			b.HumanoidRootPart.CFrame = l * CFrame.new(0, math.random(0, 2), math.random(0, 2))
+			task.spawn(function()
+				local E = b.Humanoid.Health
+				task.wait(3.5)
+				if b.Humanoid.Health == E and not b:FindFirstChild("Ignored") then
+					b.HumanoidRootPart.CFrame = b.WorldPivot
+					Instance.new("IntValue", b).Name = "Ignored"
+					task.wait(0.3)
+				end
+			end)
+			getgenv().DaBringMob = true
+		end
+	end
+end
+function GetLastRaidIsland()
+	local b, E = 0
+	for l, y in ipairs(wOrigin.Locations:GetChildren()) do
+		if string.find(y.Name, "Island ") and t:DistanceFromCharacter(y.Position) < 3000 then
+			l = tonumber((y.Name:gsub("Island ", "")))
+			if b < l then
+				b, E = l, y
+			end
+		end
+	end
+	return E
+end
+function CheckInRaid()
+	for b, b in ipairs(wOrigin.Locations:GetChildren()) do
+		if string.find(b.Name, "Island ") and t:DistanceFromCharacter(b.Position) < 3000 then
+			return true
+		end
+	end
+end
+function CheckAutoRaid()
+	if
+		not getgenv().buychip
+		or game:GetService("Players").LocalPlayer.PlayerGui.Main.TopHUDList.RaidTimer.Visible and (CheckInRaid())
+	then
+		return true
+	end
+end
+getgenv().CheckIsplayingRaid = function()
+	if
+		DetectItemPlr("Special Microchip")
+		or not getgenv().buychip
+		or game:GetService("Players").LocalPlayer.PlayerGui.Main.TopHUDList.RaidTimer.Visible and (CheckInRaid())
+	then
+		return true
+	end
+end
+getgenv().buychip = true
+-- BNN Sea 2/3 summon object, looked up only when NOT fighting a raid.
+-- Do not index unloaded Map objects; StreamingEnabled may remove them.
+local function BNNFindSummonMain()
+    local map = WS:FindFirstChild("Map")
+    local base = map and (sea() == 3 and map:FindFirstChild("Boat Castle") or map:FindFirstChild("CircleIsland"))
+    local summon = base and base:FindFirstChild("RaidSummon2")
+    local button = summon and summon:FindFirstChild("Button")
+    local main = button and button:FindFirstChild("Main")
+    return main
+end
+RaidsSection.CreateToggle({ Title = "Auto Raid", Desc = nil, Default = Settings["Auto Raid"] or false }, function(b)
+	if b then
+		spawn(function()
+			while Settings["Auto Raid"] and (task.wait()) do
+				local raidOK, raidError = pcall(function()
+                    if PAUSED then return end
+                    if not (LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")) then setStatus("Waiting for character"); return end
+                    local raidVisible = raidTimerVisible()
+                    local inRaid = CheckInRaid()
+                    -- Only request the raid button outside a running raid.
+                    local l = (not raidVisible and not inRaid) and BNNFindSummonMain() or nil
+					if not raidVisible and not inRaid then
+						if getgenv().TickTeleCastle and tick() - getgenv().TickTeleCastle < 5 then
+							return
+						end
+                        -- A missing summon object must NOT block buying a chip.
+                        -- Only approach its map area when already holding a chip.
+                        if not l and DetectItemPlr("Special Microchip") then
+                            setStatus("Streaming BNN summon area")
+                            toTarget(CFrame.new(-5500, 314, -2855), false, true)
+                            return
+                        end
+					end
+                    if not raidVisible and not inRaid and DetectItemPlr("Special Microchip") then
+						if getgenv().waitgoraid then
+							wait(5)
+							getgenv().waitgoraid = false
+						end
+						getgenv().buychip = false
+                        if not l then
+                            setStatus("Summon object not streamed; waiting")
+                            return
+                        end
+                        local detector = l:FindFirstChildWhichIsA("ClickDetector") or l:FindFirstChild("ClickDetector")
+                        if detector and type(fireclickdetector) == "function" then
+                            fireclickdetector(detector)
+                        else
+                            setStatus("Summon ClickDetector not available")
+                            return
+                        end
+						getgenv().TickTeleCastle = tick()
+						if getgenv().Tween then
+							getgenv().Tween:Pause()
+							getgenv().Tween:Cancel()
+						end
+						return
+					end
+                    if raidVisible and inRaid then
+                        ERR = "" -- stale errors from pre-raid are no longer active
+						getgenv().waitgoraid = true
+						getgenv().buychip = true
+						l = DetectMobRaid()
+						if l then
+							repeat
+                                task.wait()
+                                -- Mob may despawn between frames; BNN helper functions use direct HRP access.
+                                if not IsMobAlive(l) then break end
+                                if not (LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")) then break end
+                                if not getgenv().KillMobRaid and Settings["Kill Aura Only Raid And Volcano"] then
+									getgenv().KillMobRaid = true
+									local y = Settings["Time Delay Kill"] or 5
+									l.Humanoid:ChangeState(Enum.HumanoidStateType.Dead)
+									delay(y, function()
+										getgenv().KillMobRaid = false
+									end)
+								end
+								UsedualFlock()
+								ClickM1(l)
+								sizepart(l)
+								BringMobRaid(l)
+                                local _, playerHum, playerRoot = character()
+                                local mobRoot = l:FindFirstChild("HumanoidRootPart")
+                                if not mobRoot or not playerHum or not playerRoot then break end
+                                local lowHP = playerHum.Health < playerHum.MaxHealth * 0.55
+                                local altitude = lowHP and 43 or 33
+                                local lateral = Settings["Select Weapon"] == "Blox Fruit" and -12 or 13
+                                toTarget(mobRoot.CFrame * CFrame.new(lateral, altitude, 0))
+                                -- Give the character a little vertical room during heavy skill damage.
+                                if lowHP then task.wait(0.12) end
+                            until not IsMobAlive(l) or not raidTimerVisible() or not LP.Character or not LP.Character:FindFirstChild("HumanoidRootPart")
+						else
+							local y = GetLastRaidIsland()
+							if y then
+								if y.Name == "Island 2" and Settings["Select Raid"] == "Phoenix" then
+									toTarget(y.CFrame * CFrame.new(300, 60, 0))
+								else
+									toTarget(y.CFrame * CFrame.new(0, 60, 0))
+								end
+							end
+						end
+						return
+					end
+					if
+						getgenv().buychip
+						and t.Data.Level.Value >= 1100
+						and not t.PlayerGui.Main.TopHUDList.RaidTimer.Visible
+						and not DetectItemPlr("Special Microchip")
+						and not CheckInRaid()
+					then
+                        -- Preserve BNN fruit inventory -> RaidsNpc calls; hop only if unable to buy.
+                        local stored = TakeFruitInventory(true)
+                        if not CheckFruitplr() and stored and Settings["Get Fruit In Inventory Low Beli"] then
+                            setStatus("BNN: loading stored fruit " .. tostring(stored))
+                            Comm:InvokeServer("LoadFruit", stored)
+                            task.wait(0.6)
+                        end
+                        if tick() - (getgenv().__BNN_RAID_LAST_BUY or 0) < CFG.BuyCooldown then return end
+                        getgenv().__BNN_RAID_LAST_BUY = tick()
+                        setStatus(CheckFruitplr() and "Buying raid chip with fruit" or "Buying raid chip with Beli")
+                        Comm:InvokeServer("RaidsNpc", "Check")
+                        Comm:InvokeServer("RaidsNpc", "Select", Settings["Select Raid"] or "Flame")
+                        task.wait(1)
+                        if DetectItemPlr("Special Microchip") then
+                            ERR = ""
+                            setStatus("Chip purchased; preparing raid")
+                            return
+                        end
+                        if stored or CheckFruitplr() then
+                            setStatus("Waiting chip purchase / cooldown")
+                            return
+                        end
+                        if Settings["Hop Sever Raid"] then
+                            -- BNN GetPathFruit(): Workspace Tool/Model named Fruit with Handle.
+                            -- BNN collection route: toTarget(Handle.CFrame, true).
+                            local ground = GetPathFruit()
+                            if ground and ground:FindFirstChild("Handle") then
+                                local playerRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+                                local handle = ground:FindFirstChild("Handle")
+                                if playerRoot and handle then
+                                    if (handle.Position - playerRoot.Position).Magnitude > 5 then
+                                        setStatus("Collecting world fruit (BNN route)")
+                                        toTarget(handle.CFrame, true)
+                                    else
+                                        setStatus("Touching world fruit")
+                                        pcall(function()
+                                            game:GetService("VirtualInputManager"):SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+                                            task.wait()
+                                            game:GetService("VirtualInputManager"):SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+                                        end)
+                                    end
+                                    return
+                                end
+                            end
+                            if not hopping then setStatus("No world fruit; starting BNN server hop") end
+                            HopServer()
+                        end
+					end
+				end)
+				if not raidOK then
+					ERR = tostring(raidError)
+					setStatus("Raid error", ERR)
+					warn("[AUTO RAID / Original BNN] " .. ERR)
+				end
+			end
+		end)
+	end
+	SaveSettings("Auto Raid", b)
+end)
+-- ================= END ORIGINAL RAID MODULE =================
+-- GUI refresh is isolated: sandboxed executors can deny access to particular
+-- Instances ("lacking capability Plugin"). Such a denial must not kill status UI.
+local function safeText(fn, fallback)
+    local ok, value = pcall(fn)
+    if ok and value ~= nil then return tostring(value) end
+    return fallback or "?"
+end
+local function refreshStatusUI()
+    local islandNum = safeText(function()
+        local _, idx = newestRaidIsland()
+        return idx and idx > 0 and idx or "-"
+    end, "-")
+    local cheapCount = safeText(function()
+        local _, count = cheapStoredFruit(false)
+        return count
+    end, "?")
+    local team = safeText(function() return LP.Team and LP.Team.Name end, "Choosing team")
+    local chip = safeText(function() return hasItem("Special Microchip") and "YES" or "NO" end)
+    local physicalFruit = safeText(function() return heldFruit() and "YES" or "NO" end)
+    -- Never traverse LP.Data without pcall: some executors deny a protected Instance.
+    local beli = safeText(function()
+        local data = LP:FindFirstChild("Data")
+        local money = data and data:FindFirstChild("Beli")
+        return money and money.Value
+    end)
+    local level = safeText(function()
+        local data = LP:FindFirstChild("Data")
+        local lvl = data and data:FindFirstChild("Level")
+        return lvl and lvl.Value
+    end)
+    head.Text = "AUTO RAID"
+    stateLabel.Text = "STATUS  " .. PHASE
+    infoLabel.Text = string.format("Sea %d  |  %s  |  Island %s  |  Hops %d", sea(), CFG.Raid, islandNum, HOPS)
+    fruitLabel.Text = string.format("Chip: %s    Fruit held: %s    Cheap (<2M): %s    Beli: %s", chip, physicalFruit, cheapCount, beli)
+    errorLabel.Text = ERR ~= "" and ("Last error: " .. ERR) or ("Aura: " .. safeText(function()
+        local ch = LP.Character
+        if not ch then return "checking" end
+        if ch:FindFirstChild("HasBuso") then return "ON" end
+        for _, obj in ipairs(ch:GetChildren()) do
+            if string.find(obj.Name, "_BusoLayer1", 1, true) then return "ON" end
+        end
+        return "activating"
+    end, "checking") .. " | Fast Attack | Bring Mob")
+    raidLabel.Text = "Level " .. level
+end
+
+-- Refresh from an engine callback; do not let an executor-specific Instance
+-- capability failure stop the raid controller or leave default Label text.
+local lastUiRefresh = 0
+RunService.Heartbeat:Connect(function()
+    if not RUNNING or tick() - lastUiRefresh < 1 then return end
+    lastUiRefresh = tick()
+    local ok, err = pcall(refreshStatusUI)
+    if not ok and tick() - (ENV.__BNN_UI_WARN_AT or 0) > 15 then
+        ENV.__BNN_UI_WARN_AT = tick()
+        warn("[AUTO RAID] UI update blocked: " .. tostring(err))
+    end
+end)
+
+-- The original BNN Auto Turn On Buso routine: check HasBuso / _BusoLayer1
+-- before invoking CommF_("Buso"). Do not toggle when already active.
+local lastBusoCheck = -math.huge
+local function ensureBuso()
+    if not CFG.AutoBuso or tick() - lastBusoCheck < 2 then return end
+    lastBusoCheck = tick()
+    local ch = LP.Character
+    if not ch then return end
+    local active = ch:FindFirstChild("HasBuso") ~= nil
+    if not active then
+        for _, child in ipairs(ch:GetChildren()) do
+            if string.find(child.Name, "_BusoLayer1", 1, true) then
+                active = true
+                break
+            end
+        end
+    end
+    if not active then invoke("Buso") end
+end
+
+
+-- Optional FPS boost does not block original raid loop.
+if CFG.FPSBoost then task.spawn(function() pcall(fpsBoost) end) end
+task.spawn(function() pcall(joinMarines) end)
+setStatus("Original BNN raid running")
+
+]====]
+local ENV = (type(getgenv) == "function" and getgenv()) or _G
+ENV.__BNN_RAID_SCRIPT_BODY = PAYLOAD
+loadstring(PAYLOAD)()
