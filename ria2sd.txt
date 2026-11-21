@@ -1,1 +1,748 @@
-loadstring(game:HttpGet("https://raw.githubusercontent.com/teddyhubdev/diepvy/refs/heads/main/TeddyHub.lua"))() 
+repeat task.wait() until game:IsLoaded() and game.Players.LocalPlayer
+
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local CS = game:GetService("CollectionService")
+local Lighting = game:GetService("Lighting")
+local StarterGui = game:GetService("StarterGui")
+local GuiService = game:GetService("GuiService")
+local VIM = game:GetService("VirtualInputManager")
+
+local LP = Players.LocalPlayer
+local CommF = RS:WaitForChild("Remotes"):WaitForChild("CommF_")
+local CommE = RS:WaitForChild("Remotes"):WaitForChild("CommE")
+local Net = RS:WaitForChild("Modules"):WaitForChild("Net")
+
+-- Cấu hình
+getgenv().Team = getgenv().Team or "Pirates"                   -- "Pirates" hoặc "Marines"
+getgenv().TargetFragments = getgenv().TargetFragments or 14000     -- Đủ 14k F thì dừng báo DONE
+getgenv().FpsBoost = (getgenv().FpsBoost ~= false)             -- Mặc định bật FPS Boost
+getgenv().FpsCap = getgenv().FpsCap or 15                      -- Set FPS cap 15
+
+local TargetFragments = getgenv().TargetFragments
+local FpsCap = getgenv().FpsCap
+local Running, Unloaded, Raiding = true, false, false
+local FpsBoostEnabled = getgenv().FpsBoost
+local LoadRaidUntil, TargetPos, BringTarget, BringCF = 0, nil, nil, nil
+local Conns, LoDParts = {}, {}
+local CurrentStatus = "Khởi động..."
+local CurrentFPS = 15
+local FruitText = "Fruit <2M: Đang tải..."
+local FrameCount, LastFpsUpdate = 0, tick()
+
+-- Khóa FPS
+local function LockFPS(cap)
+	pcall(function()
+		if setfpscap then setfpscap(cap or FpsCap) end
+	end)
+end
+LockFPS(FpsCap)
+
+-- ====================================================================
+-- 0. HÀM CHECK FRAGMENTS & CHỌN TEAM
+-- ====================================================================
+local function GetFragments()
+	local data = LP:FindFirstChild("Data")
+	local f = data and data:FindFirstChild("Fragments")
+	return tonumber(f and f.Value) or 0
+end
+
+local function JoinTeam(teamName)
+	teamName = teamName or getgenv().Team or "Pirates"
+	if LP.Team and LP.Team.Name == teamName and LP.Character and LP.Character:FindFirstChild("HumanoidRootPart") then
+		return true
+	end
+
+	local startTime = tick()
+	while not Unloaded do
+		if LP.Team and LP.Team.Name == teamName and LP.Character and LP.Character:FindFirstChild("HumanoidRootPart") then
+			break
+		end
+		if tick() - startTime > 10 then break end
+
+		pcall(function() CommF:InvokeServer("SetTeam", teamName) end)
+
+		pcall(function()
+			local pg = LP:FindFirstChild("PlayerGui")
+			local mainGui = pg and (pg:FindFirstChild("Main (minimal)") or pg:FindFirstChild("Main"))
+			local choose = mainGui and mainGui:FindFirstChild("ChooseTeam", true)
+			if choose and choose.Visible then
+				local container = choose:FindFirstChild("Container") or choose
+				local frame = container:FindFirstChild(teamName, true)
+				local btn = frame and (frame:FindFirstChildWhichIsA("TextButton", true) or frame:FindFirstChildWhichIsA("ImageButton", true))
+				if btn then
+					if firesignal then
+						firesignal(btn.Activated)
+					elseif getconnections then
+						for _, c in ipairs(getconnections(btn.Activated)) do c.Function() end
+					end
+					if GuiService and VIM then
+						btn.Selectable = true
+						GuiService.SelectedObject = btn
+						VIM:SendKeyEvent(true, Enum.KeyCode.Return, false, game)
+						task.wait(0.05)
+						VIM:SendKeyEvent(false, Enum.KeyCode.Return, false, game)
+						GuiService.SelectedObject = nil
+					end
+				end
+			end
+		end)
+		task.wait(0.4)
+	end
+	return (LP.Team and LP.Team.Name == teamName)
+end
+
+-- Tự động chọn team
+JoinTeam(getgenv().Team)
+
+-- Anti-AFK
+pcall(function()
+	local vu = game:GetService("VirtualUser")
+	LP.Idled:Connect(function()
+		vu:Button2Down(Vector2.zero, workspace.CurrentCamera.CFrame)
+		task.wait(1)
+		vu:Button2Up(Vector2.zero, workspace.CurrentCamera.CFrame)
+	end)
+end)
+
+-- Stream bệ Raid từ xa (Sea 2 & Sea 3)
+for _, pos in ipairs({Vector3.new(-6438, 250, -4500), Vector3.new(-5018, 315, -2828)}) do
+	local p = Instance.new("Part", workspace.CurrentCamera)
+	p.Anchored, p.CanCollide, p.Transparency, p.Size, p.CFrame = true, false, 1, Vector3.zero, CFrame.new(pos)
+	CS:AddTag(p, "LoDPosition")
+	table.insert(LoDParts, p)
+end
+
+-- ====================================================================
+-- 1. UI NGẮN GỌN - HIỆU QUẢ (Đo FPS, F, Fruit, Nút chức năng)
+-- ====================================================================
+local function GetGuiParent()
+	local ok, res = pcall(gethui)
+	if ok and res then return res end
+	ok, res = pcall(function() return game:GetService("CoreGui") end)
+	if ok and res then return res end
+	return LP:WaitForChild("PlayerGui")
+end
+
+local parentGui = GetGuiParent()
+if parentGui:FindFirstChild("KaitunLightRaid") then
+	pcall(function() parentGui.KaitunLightRaid:Destroy() end)
+end
+
+local Gui = Instance.new("ScreenGui")
+Gui.Name, Gui.ResetOnSpawn = "KaitunLightRaid", false
+Gui.Parent = parentGui
+
+local Main = Instance.new("Frame", Gui)
+Main.Size, Main.Position = UDim2.new(0, 265, 0, 136), UDim2.new(0.5, -132, 0, 20)
+Main.BackgroundColor3, Main.Active, Main.Draggable = Color3.fromRGB(20, 22, 28), true, true
+Instance.new("UICorner", Main).CornerRadius = UDim.new(0, 8)
+local Stroke = Instance.new("UIStroke", Main)
+Stroke.Color, Stroke.Thickness = Color3.fromRGB(45, 52, 70), 1
+
+local Status = Instance.new("TextLabel", Main)
+Status.Size, Status.Position, Status.BackgroundTransparency = UDim2.new(1, -16, 0, 20), UDim2.new(0, 8, 0, 6), 1
+Status.Font, Status.TextSize, Status.TextColor3 = Enum.Font.GothamBold, 12, Color3.new(1, 1, 1)
+Status.TextXAlignment = Enum.TextXAlignment.Left
+
+local InfoLabel = Instance.new("TextLabel", Main)
+InfoLabel.Size, InfoLabel.Position, InfoLabel.BackgroundTransparency = UDim2.new(1, -16, 0, 34), UDim2.new(0, 8, 0, 26), 1
+InfoLabel.Font, InfoLabel.TextSize, InfoLabel.TextColor3 = Enum.Font.Gotham, 11, Color3.fromRGB(185, 225, 255)
+InfoLabel.TextXAlignment, InfoLabel.TextYAlignment = Enum.TextXAlignment.Left, Enum.TextYAlignment.Top
+InfoLabel.TextWrapped = true
+
+-- Row 1: Raid Toggle & Team Select
+local ToggleBtn = Instance.new("TextButton", Main)
+ToggleBtn.Size, ToggleBtn.Position = UDim2.new(0, 122, 0, 28), UDim2.new(0, 8, 0, 64)
+ToggleBtn.BackgroundColor3, ToggleBtn.Font, ToggleBtn.TextSize = Color3.fromRGB(46, 160, 67), Enum.Font.GothamBold, 12
+ToggleBtn.TextColor3, ToggleBtn.Text = Color3.new(1, 1, 1), "Raid: ON"
+Instance.new("UICorner", ToggleBtn).CornerRadius = UDim.new(0, 6)
+
+local TeamBtn = Instance.new("TextButton", Main)
+TeamBtn.Size, TeamBtn.Position = UDim2.new(0, 122, 0, 28), UDim2.new(0, 135, 0, 64)
+TeamBtn.BackgroundColor3, TeamBtn.Font, TeamBtn.TextSize = Color3.fromRGB(190, 50, 50), Enum.Font.GothamBold, 12
+TeamBtn.TextColor3, TeamBtn.Text = Color3.new(1, 1, 1), "Team: Pirates"
+Instance.new("UICorner", TeamBtn).CornerRadius = UDim.new(0, 6)
+
+-- Row 2: FPS Boost & Unload
+local FpsBtn = Instance.new("TextButton", Main)
+FpsBtn.Size, FpsBtn.Position = UDim2.new(0, 122, 0, 28), UDim2.new(0, 8, 0, 98)
+FpsBtn.BackgroundColor3, FpsBtn.Font, FpsBtn.TextSize = Color3.fromRGB(30, 140, 180), Enum.Font.GothamBold, 12
+FpsBtn.TextColor3, FpsBtn.Text = Color3.new(1, 1, 1), "FPS: 15 (ON)"
+Instance.new("UICorner", FpsBtn).CornerRadius = UDim.new(0, 6)
+
+local UnloadBtn = Instance.new("TextButton", Main)
+UnloadBtn.Size, UnloadBtn.Position = UDim2.new(0, 122, 0, 28), UDim2.new(0, 135, 0, 98)
+UnloadBtn.BackgroundColor3, UnloadBtn.Font, UnloadBtn.TextSize = Color3.fromRGB(175, 45, 45), Enum.Font.GothamBold, 12
+UnloadBtn.TextColor3, UnloadBtn.Text = Color3.new(1, 1, 1), "Unload"
+Instance.new("UICorner", UnloadBtn).CornerRadius = UDim.new(0, 6)
+
+local function UpdateStatusText()
+	if Status and Status.Parent then
+		Status.Text = string.format("Light Raid [%d FPS] | %s", CurrentFPS, CurrentStatus)
+	end
+end
+
+local function SetStatus(s)
+	CurrentStatus = s
+	UpdateStatusText()
+end
+
+local function UpdateInfo()
+	local frags = GetFragments()
+	local fragText = string.format("F: %s / %s", tostring(frags), tostring(TargetFragments))
+	if frags >= TargetFragments then
+		fragText = fragText .. " (ĐÃ ĐỦ DONE!)"
+	end
+	InfoLabel.Text = fragText .. "\n" .. FruitText
+end
+
+local function UpdateTeamButton()
+	local cur = (LP.Team and LP.Team.Name) or getgenv().Team or "Pirates"
+	TeamBtn.Text = "Team: " .. cur
+	TeamBtn.BackgroundColor3 = (cur == "Pirates") and Color3.fromRGB(190, 50, 50) or Color3.fromRGB(40, 115, 210)
+end
+
+local function UpdateFpsButton()
+	FpsBtn.Text = FpsBoostEnabled and ("FPS: " .. FpsCap .. " (ON)") or "FPS Boost: OFF"
+	FpsBtn.BackgroundColor3 = FpsBoostEnabled and Color3.fromRGB(30, 140, 180) or Color3.fromRGB(90, 90, 90)
+end
+
+-- ====================================================================
+-- 2. HỆ THỐNG FPS BOOST TỐI ƯU GỌN GÀNG (Set FPS Cap 15)
+-- ====================================================================
+local ZeroRange = NumberRange.new(0)
+local ZeroSequence = NumberSequence.new(1)
+local LightTypes = { PointLight = true, SpotLight = true, SurfaceLight = true }
+
+local function OptimizeLighting()
+	pcall(function()
+		Lighting.GlobalShadows = false
+		Lighting.FogEnd = 9e9
+		Lighting.Brightness = 0
+		Lighting.Ambient = Color3.fromRGB(128, 128, 128)
+		Lighting.OutdoorAmbient = Color3.fromRGB(128, 128, 128)
+	end)
+	for _, v in ipairs(Lighting:GetDescendants()) do
+		pcall(function()
+			if v:IsA("PostEffect") or v:IsA("Atmosphere") or v:IsA("Clouds") then v.Enabled = false end
+		end)
+	end
+	if sethiddenproperty then pcall(sethiddenproperty, Lighting, "Technology", Enum.Technology.Compatibility) end
+end
+
+local function OptimizeTerrain()
+	local terrain = workspace:FindFirstChildOfClass("Terrain")
+	if terrain then
+		pcall(function()
+			terrain.WaterWaveSize = 0
+			terrain.WaterWaveSpeed = 0
+			terrain.WaterReflectance = 0
+			terrain.Decoration = false
+		end)
+	end
+end
+
+local function OptimizeBloxFruits()
+	pcall(function()
+		local shaker = RS:FindFirstChild("Util") and RS.Util:FindFirstChild("CameraShaker")
+		if shaker and shaker:IsA("ModuleScript") then require(shaker):Stop() end
+	end)
+	pcall(function()
+		local opt = LP:FindFirstChild("PlayerScripts") and LP.PlayerScripts:FindFirstChild("OptimizerClientActor")
+		if opt then opt:SendMessage("Optimize", true) end
+	end)
+	pcall(function()
+		StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, false)
+		StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.EmotesMenu, false)
+	end)
+	pcall(function()
+		local pg = LP:FindFirstChildOfClass("PlayerGui")
+		if pg then
+			if pg:FindFirstChild("Notifications") then pg.Notifications.Enabled = false end
+			local dmg = pg:FindFirstChild("Main") and pg.Main:FindFirstChild("DamageCounter")
+			if dmg then dmg.Enabled, dmg.Visible = false, false end
+		end
+	end)
+end
+
+local function OptimizeInstance(inst)
+	if not FpsBoostEnabled or not inst or not inst.Parent then return end
+	local char = LP.Character
+	if char and (inst == char or inst:IsDescendantOf(char)) then return end
+	if Gui and inst:IsDescendantOf(Gui) then return end
+
+	local name = inst.Name
+	if name == "RelicFire" or name == "RaidSummon2" or name == "Locations"
+		or name == "Island 1" or name == "Island 2" or name == "Island 3" or name == "Island 4" or name == "Island 5" then
+		return
+	end
+
+	pcall(function()
+		local cls = inst.ClassName
+		if cls == "ParticleEmitter" then
+			if inst.Parent and inst.Parent.Name ~= "RelicFire" then
+				inst.Lifetime, inst.Enabled = ZeroRange, false
+			end
+		elseif cls == "Trail" or cls == "Beam" then
+			inst.Transparency, inst.Enabled = ZeroSequence, false
+		elseif cls == "Smoke" or cls == "Fire" or cls == "Sparkles" then
+			inst.Enabled = false
+		elseif cls == "Explosion" then
+			inst.Visible = false
+		elseif cls == "Highlight" then
+			inst.FillTransparency, inst.OutlineTransparency, inst.Enabled = 1, 1, false
+		elseif cls == "SurfaceAppearance" then
+			inst:Destroy()
+		elseif LightTypes[cls] then
+			inst.Enabled = false
+		elseif cls == "Decal" or cls == "Texture" then
+			inst.Transparency = 1
+		elseif inst:IsA("MeshPart") then
+			inst.CastShadow, inst.Reflectance, inst.Material = false, 0, Enum.Material.SmoothPlastic
+			pcall(function() inst.TextureID = "" end)
+		elseif inst:IsA("BasePart") then
+			inst.CastShadow, inst.Reflectance = false, 0
+			if inst.Material ~= Enum.Material.SmoothPlastic and inst.Material ~= Enum.Material.ForceField and inst.Material ~= Enum.Material.Neon then
+				inst.Material = Enum.Material.SmoothPlastic
+			end
+		end
+	end)
+end
+
+local function HideOtherCharacter(character)
+	if not FpsBoostEnabled or not character or character == LP.Character then return end
+	local function hide(d)
+		pcall(function()
+			if d:IsA("BasePart") then
+				d.LocalTransparencyModifier, d.CastShadow = 1, false
+			elseif d:IsA("Decal") or d:IsA("Texture") then
+				d.Transparency = 1
+			elseif d:IsA("ParticleEmitter") or d:IsA("Trail") or d:IsA("Beam") or d:IsA("Highlight") then
+				d.Enabled = false
+			end
+		end)
+	end
+	for _, d in ipairs(character:GetDescendants()) do hide(d) end
+	character.DescendantAdded:Connect(hide)
+end
+
+local FpsBoostApplied = false
+local function ApplyFpsBoost()
+	if not FpsBoostEnabled then return end
+	LockFPS(FpsCap)
+	pcall(function()
+		settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+		workspace.InterpolationThrottling = Enum.InterpolationThrottlingMode.Enabled
+	end)
+	OptimizeLighting()
+	OptimizeTerrain()
+	OptimizeBloxFruits()
+
+	if not FpsBoostApplied then
+		FpsBoostApplied = true
+		task.spawn(function()
+			local list = workspace:GetDescendants()
+			for i = 1, #list do
+				if not FpsBoostEnabled then break end
+				OptimizeInstance(list[i])
+				if i % 300 == 0 then task.wait() end
+			end
+		end)
+		table.insert(Conns, workspace.DescendantAdded:Connect(function(inst)
+			if FpsBoostEnabled then task.defer(OptimizeInstance, inst) end
+		end))
+		for _, p in ipairs(Players:GetPlayers()) do
+			if p ~= LP then
+				if p.Character then task.spawn(HideOtherCharacter, p.Character) end
+				table.insert(Conns, p.CharacterAdded:Connect(function(c) task.wait(0.5); HideOtherCharacter(c) end))
+			end
+		end
+		table.insert(Conns, Players.PlayerAdded:Connect(function(p)
+			if p ~= LP then
+				table.insert(Conns, p.CharacterAdded:Connect(function(c) task.wait(0.5); HideOtherCharacter(c) end))
+			end
+		end))
+	end
+end
+
+-- Vòng lặp duy trì FPS Cap 15 và dọn dẹp VFX tạm
+task.spawn(function()
+	while not Unloaded do
+		task.wait(2)
+		if FpsBoostEnabled then
+			pcall(function()
+				if getfpscap and getfpscap() > FpsCap then
+					LockFPS(FpsCap)
+				elseif not getfpscap then
+					LockFPS(FpsCap)
+				end
+			end)
+			pcall(function()
+				local temp = workspace:FindFirstChild("Temporary")
+				if temp then temp:ClearAllChildren() end
+			end)
+			pcall(OptimizeBloxFruits)
+		end
+	end
+end)
+
+UpdateTeamButton()
+UpdateFpsButton()
+UpdateInfo()
+if FpsBoostEnabled then ApplyFpsBoost() end
+
+-- ====================================================================
+-- 3. XỬ LÝ SỰ KIỆN NÚT
+-- ====================================================================
+local function CleanPhysics()
+	TargetPos = nil
+	local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+	if hrp and hrp:FindFirstChild("RaidFloat") then hrp.RaidFloat:Destroy() end
+end
+
+ToggleBtn.MouseButton1Click:Connect(function()
+	if GetFragments() >= TargetFragments then
+		SetStatus("DONE (Đã đủ " .. TargetFragments .. " F!)")
+		return
+	end
+	Running = not Running
+	ToggleBtn.Text = Running and "Raid: ON" or "Raid: OFF"
+	ToggleBtn.BackgroundColor3 = Running and Color3.fromRGB(46, 160, 67) or Color3.fromRGB(90, 90, 90)
+	if not Running then CleanPhysics() end
+end)
+
+TeamBtn.MouseButton1Click:Connect(function()
+	local nextTeam = (getgenv().Team == "Pirates") and "Marines" or "Pirates"
+	getgenv().Team = nextTeam
+	UpdateTeamButton()
+	task.spawn(function()
+		SetStatus("Đổi team: " .. nextTeam .. "...")
+		JoinTeam(nextTeam)
+		UpdateTeamButton()
+	end)
+end)
+
+FpsBtn.MouseButton1Click:Connect(function()
+	FpsBoostEnabled = not FpsBoostEnabled
+	getgenv().FpsBoost = FpsBoostEnabled
+	UpdateFpsButton()
+	if FpsBoostEnabled then
+		ApplyFpsBoost()
+		LockFPS(FpsCap)
+	else
+		LockFPS(60)
+	end
+end)
+
+UnloadBtn.MouseButton1Click:Connect(function()
+	Running, Unloaded = false, true
+	CleanPhysics()
+	LockFPS(60)
+	for _, c in ipairs(Conns) do pcall(function() c:Disconnect() end) end
+	for _, p in ipairs(LoDParts) do pcall(function() p:Destroy() end) end
+	if Gui and Gui.Parent then Gui:Destroy() end
+end)
+
+-- ====================================================================
+-- 4. LOGIC RAID & COMBAT
+-- ====================================================================
+if RS:WaitForChild("Remotes"):FindFirstChild("Raids") then
+	table.insert(Conns, RS.Remotes.Raids.OnClientEvent:Connect(function(state)
+		Raiding = (state == "StartTimer")
+	end))
+end
+
+local function InRaid()
+	local pg = LP:FindFirstChild("PlayerGui")
+	local timer = pg and pg:FindFirstChild("Main") and pg.Main:FindFirstChild("TopHUDList") and pg.Main.TopHUDList:FindFirstChild("RaidTimer")
+	return Raiding or (timer and timer.Visible)
+end
+
+-- Đo FPS
+table.insert(Conns, RunService.RenderStepped:Connect(function()
+	FrameCount = FrameCount + 1
+	local now = tick()
+	if now - LastFpsUpdate >= 1 then
+		CurrentFPS = math.floor(FrameCount / (now - LastFpsUpdate))
+		FrameCount = 0
+		LastFpsUpdate = now
+		UpdateStatusText()
+		UpdateInfo()
+	end
+end))
+
+-- Noclip
+table.insert(Conns, RunService.Stepped:Connect(function()
+	local char = LP.Character
+	if not Running or not char then return end
+	for _, v in ipairs(char:GetDescendants()) do
+		if v:IsA("BasePart") and v.CanCollide then v.CanCollide = false end
+	end
+end))
+
+-- Tween mượt
+table.insert(Conns, RunService.Heartbeat:Connect(function(dt)
+	local char = LP.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not Running or not hrp or not hum or hum.Health <= 0 then return end
+
+	if not hrp:FindFirstChild("RaidFloat") then
+		local bv = Instance.new("BodyVelocity", hrp)
+		bv.Name, bv.MaxForce, bv.Velocity = "RaidFloat", Vector3.new(1e6, 1e6, 1e6), Vector3.zero
+	end
+
+	if TargetPos then
+		hum.Sit = false
+		local diff = TargetPos - hrp.Position
+		local dist = diff.Magnitude
+		local step = 325 * dt
+		local nextPos = dist <= step and TargetPos or (hrp.Position + diff.Unit * step)
+		hrp.CFrame = CFrame.new(nextPos) * hrp.CFrame.Rotation
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.AssemblyAngularVelocity = Vector3.zero
+	end
+end))
+
+-- Auto V3 & V4
+task.spawn(function()
+	while not Unloaded do
+		task.wait(1)
+		if not Running or not InRaid() then continue end
+		pcall(function()
+			CommE:FireServer("ActivateAbility")
+			local char = LP.Character
+			local energy = char and char:FindFirstChild("RaceEnergy")
+			local trans = char and char:FindFirstChild("RaceTransformed")
+			if energy and energy.Value >= 1 and trans and not trans.Value then
+				local awk = LP.Backpack:FindFirstChild("Awakening") or char:FindFirstChild("Awakening")
+				if awk then awk.RemoteFunction:InvokeServer(true) end
+			end
+		end)
+	end
+end)
+
+local function HasChip()
+	local c = LP.Character
+	return (c and c:FindFirstChild("Special Microchip")) or LP.Backpack:FindFirstChild("Special Microchip")
+end
+
+-- Quét trái dưới 2M Beli
+local function ScanFruitInventory()
+	local list, cheapKey, minPrice = {}, nil, 2000000
+	pcall(function()
+		local IRS = require(RS.ItemReplicationService)
+		local MATCH = require(RS.ItemConfig.Storage).match
+		for _, v in ipairs(IRS:GetItems(IRS.KEYS.QUANTITY)) do
+			if v.Value and v.Value > 0 then
+				local item = MATCH(v.ItemId)._ok
+				if item and item.Display.Category == "Blox Fruit" and item.Quality.MoneyPrice < 2000000 then
+					local key = item.Index.StorageKey
+					local shortName = (item.Display.Name or key):gsub(" Fruit", "")
+					table.insert(list, shortName .. " x" .. v.Value)
+					if item.Quality.MoneyPrice < minPrice then
+						minPrice = item.Quality.MoneyPrice
+						cheapKey = key
+					end
+				end
+			end
+		end
+	end)
+	FruitText = "Fruit <2M: " .. (#list > 0 and table.concat(list, ", ") or "Trống")
+	UpdateInfo()
+	return cheapKey
+end
+
+local function BuyLightChip()
+	if InRaid() or tick() < LoadRaidUntil or GetFragments() >= TargetFragments then return false end
+	local cheapFruit = ScanFruitInventory()
+	if HasChip() then return true end
+
+	SetStatus("Mua chip Light (Beli)...")
+	CommF:InvokeServer("RaidsNpc", "Select", "Light")
+	task.wait(0.3)
+	if HasChip() then return true end
+
+	if cheapFruit then
+		SetStatus("Đổi " .. cheapFruit .. " lấy chip Light...")
+		CommF:InvokeServer("LoadFruit", cheapFruit)
+		task.wait(0.35)
+		CommF:InvokeServer("RaidsNpc", "Select", "Light")
+		task.wait(0.3)
+		ScanFruitInventory()
+	end
+	return HasChip() ~= nil
+end
+
+local function RemoteStartRaid()
+	if GetFragments() >= TargetFragments then return false end
+	SetStatus("Start Raid từ xa...")
+	local map = workspace.Map
+	local pad = (map:FindFirstChild("CircleIsland") and map.CircleIsland:FindFirstChild("RaidSummon2"))
+		or (map:FindFirstChild("Boat Castle") and map["Boat Castle"]:FindFirstChild("RaidSummon2"))
+	local cd = pad and pad:FindFirstChildWhichIsA("ClickDetector", true)
+	if cd and fireclickdetector then
+		fireclickdetector(cd)
+		return true
+	end
+	return false
+end
+
+-- Gom quái
+local function BringMob(mob)
+	local mHrp = mob and mob:FindFirstChild("HumanoidRootPart")
+	local hrp = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+	if not mHrp or not hrp then return end
+
+	if BringTarget ~= mob then
+		BringTarget, BringCF = mob, mHrp.CFrame
+		for _, e in ipairs(workspace.Enemies:GetChildren()) do
+			if e:FindFirstChild("Ignored") then e.Ignored:Destroy() end
+		end
+	end
+	if (hrp.Position - mHrp.Position).Magnitude > 60 then return end
+
+	for _, e in ipairs(workspace.Enemies:GetChildren()) do
+		local eHrp, eHum = e:FindFirstChild("HumanoidRootPart"), e:FindFirstChildOfClass("Humanoid")
+		if eHrp and eHum and eHum.Health > 0 and not e:FindFirstChild("Ignored") then
+			if (eHrp.Position - BringCF.Position).Magnitude <= 350 and (not isnetworkowner or isnetworkowner(eHrp)) then
+				for _, p in ipairs(e:GetChildren()) do
+					if p:IsA("BasePart") and p.CanCollide then p.CanCollide = false end
+				end
+				eHrp.CFrame = BringCF * CFrame.new(0, math.random(0, 2), math.random(0, 2))
+				if not e:GetAttribute("BringWatch") then
+					e:SetAttribute("BringWatch", true)
+					task.spawn(function()
+						local hp = eHum.Health
+						task.wait(3.5)
+						if e and e.Parent and eHum.Health == hp and eHum.Health > 0 and not e:FindFirstChild("Ignored") then
+							eHrp.CFrame = e.WorldPivot
+							Instance.new("IntValue", e).Name = "Ignored"
+						end
+					end)
+				end
+			end
+		end
+	end
+end
+
+-- Tự trang bị và đánh bằng Melee
+local function AttackMelee()
+	local char = LP.Character
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if not hrp or not hum then return end
+
+	if not char:FindFirstChild("HasBuso") then
+		pcall(function() CommF:InvokeServer("Buso") end)
+	end
+
+	local tool = char:FindFirstChildOfClass("Tool")
+	if not tool or tool.ToolTip ~= "Melee" then
+		for _, t in ipairs(LP.Backpack:GetChildren()) do
+			if t:IsA("Tool") and t.ToolTip == "Melee" then
+				hum:EquipTool(t)
+				tool = t
+				break
+			end
+		end
+	end
+	if not tool or tool.ToolTip ~= "Melee" then return end
+
+	local hits = {}
+	for _, e in ipairs(workspace.Enemies:GetChildren()) do
+		local eHrp, eHum = e:FindFirstChild("HumanoidRootPart"), e:FindFirstChildOfClass("Humanoid")
+		if eHrp and eHum and eHum.Health > 0 and (eHrp.Position - hrp.Position).Magnitude <= 65 then
+			table.insert(hits, {e, e:FindFirstChild("Head") or eHrp})
+		end
+	end
+	if #hits > 0 then
+		Net["RE/RegisterAttack"]:FireServer(0)
+		Net["RE/RegisterHit"]:FireServer(hits[1][2], hits)
+	end
+end
+
+-- ====================================================================
+-- 5. VÒNG LẶP CHÍNH (MAIN LOOP)
+-- ====================================================================
+ScanFruitInventory()
+
+task.spawn(function()
+	local lastScan = 0
+	while not Unloaded do
+		task.wait(0.1)
+		pcall(function()
+			-- Kiểm tra điều kiện hoàn thành 14,000 Fragments
+			if GetFragments() >= TargetFragments and not InRaid() then
+				Running = false
+				SetStatus("DONE (Đã đủ 14k F!)")
+				Status.TextColor3 = Color3.fromRGB(80, 255, 120)
+				ToggleBtn.Text = "DONE"
+				ToggleBtn.BackgroundColor3 = Color3.fromRGB(40, 140, 60)
+				CleanPhysics()
+				UpdateInfo()
+				task.wait(1)
+				return
+			end
+
+			if not Running then return end
+
+			if not LP.Team then JoinTeam(getgenv().Team) end
+
+			if tick() - lastScan >= 3 then
+				lastScan = tick()
+				ScanFruitInventory()
+			end
+
+			local char = LP.Character
+			local hrp = char and char:FindFirstChild("HumanoidRootPart")
+			if not hrp then return end
+
+			if InRaid() then
+				LoadRaidUntil = 0
+				pcall(sethiddenproperty, LP, "SimulationRadius", math.huge)
+				local target, minDist = nil, 2500
+				for _, e in ipairs(workspace.Enemies:GetChildren()) do
+					local eHrp, eHum = e:FindFirstChild("HumanoidRootPart"), e:FindFirstChildOfClass("Humanoid")
+					if eHrp and eHum and eHum.Health > 0 then
+						local d = (eHrp.Position - hrp.Position).Magnitude
+						if d < minDist then minDist, target = d, e end
+					end
+				end
+
+				if target then
+					SetStatus("Đang đánh: " .. target.Name)
+					TargetPos = target.HumanoidRootPart.Position + Vector3.new(0, 26, 8)
+					if (target.HumanoidRootPart.Position - hrp.Position).Magnitude <= 60 then
+						BringMob(target)
+						AttackMelee()
+					end
+				else
+					for i = 5, 1, -1 do
+						local isl = workspace._WorldOrigin.Locations:FindFirstChild("Island " .. i)
+						if isl and (isl.Position - hrp.Position).Magnitude <= 6000 then
+							SetStatus("Qua đảo " .. i .. "...")
+							TargetPos = isl.Position + Vector3.new(0, 70, 0)
+							break
+						end
+					end
+				end
+			else
+				TargetPos = nil
+				if HasChip() then
+					if RemoteStartRaid() then
+						LoadRaidUntil = tick() + 18
+						task.wait(1)
+					end
+				elseif tick() < LoadRaidUntil then
+					SetStatus("Đang load vào Raid...")
+				elseif not BuyLightChip() then
+					SetStatus("Hết Beli & Fruit dưới 2M!")
+					task.wait(3)
+				end
+			end
+		end)
+	end
+end)
