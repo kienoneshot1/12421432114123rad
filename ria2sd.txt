@@ -53,7 +53,7 @@ end)
 
 -- Stream bệ Raid từ xa (Sea 2 & Sea 3)
 for _, pos in ipairs({Vector3.new(-6438, 250, -4500), Vector3.new(-5018, 315, -2828)}) do
-	local p = Instance.new("Part", workspace.CurrentCamera)
+	local p = Instance.new("Part", workspace)
 	p.Anchored, p.CanCollide, p.Transparency, p.Size, p.CFrame = true, false, 1, Vector3.zero, CFrame.new(pos)
 	CS:AddTag(p, "LoDPosition")
 	table.insert(LoDParts, p)
@@ -277,6 +277,21 @@ local function UpdateFpsButton()
 end
 
 -- ====================================================================
+-- KIỂM TRA TRONG RAID & RAIDS EVENT
+-- ====================================================================
+if RS:WaitForChild("Remotes"):FindFirstChild("Raids") then
+	table.insert(Conns, RS.Remotes.Raids.OnClientEvent:Connect(function(state)
+		Raiding = (state == "StartTimer")
+	end))
+end
+
+local function InRaid()
+	local pg = LP:FindFirstChild("PlayerGui")
+	local timer = pg and pg:FindFirstChild("Main") and pg.Main:FindFirstChild("TopHUDList") and pg.Main.TopHUDList:FindFirstChild("RaidTimer")
+	return Raiding or (timer and timer.Visible)
+end
+
+-- ====================================================================
 -- HỆ THỐNG QUÉT & RÚT FRUIT RA RAID (Chuẩn xác 100% không bị kẹt)
 -- ====================================================================
 local function ScanFruitInventory()
@@ -409,20 +424,35 @@ local function BuyLightChip()
 	return HasChip() ~= nil
 end
 
+local function GetRaidButton()
+	local map = workspace:FindFirstChild("Map") or workspace
+	local pad = (map:FindFirstChild("Boat Castle") and map["Boat Castle"]:FindFirstChild("RaidSummon2"))
+		or (map:FindFirstChild("CircleIsland") and (map.CircleIsland:FindFirstChild("RaidSummon2") or map.CircleIsland:FindFirstChild("RaidSummon")))
+		or workspace:FindFirstChild("RaidSummon2", true)
+		or workspace:FindFirstChild("RaidSummon", true)
+	if pad then
+		local btn = pad:FindFirstChild("Button")
+		local main = btn and btn:FindFirstChild("Main")
+		if main and main:FindFirstChildWhichIsA("ClickDetector") then
+			return main:FindFirstChildWhichIsA("ClickDetector")
+		end
+		return pad:FindFirstChildWhichIsA("ClickDetector", true)
+	end
+	return nil
+end
+
 local function RemoteStartRaid()
 	if GetFragments() >= TargetFragments then return false end
 	SetStatus("Start Raid từ xa...")
-	local map = workspace.Map
-	local pad = (map:FindFirstChild("CircleIsland") and map.CircleIsland:FindFirstChild("RaidSummon2"))
-		or (map:FindFirstChild("Boat Castle") and map["Boat Castle"]:FindFirstChild("RaidSummon2"))
-	local cd = pad and pad:FindFirstChildWhichIsA("ClickDetector", true)
+	local cd = GetRaidButton()
 	if cd and fireclickdetector then
 		-- Trang bị Special Microchip lên tay nếu đang ở Backpack
 		local char = LP.Character
 		local hum = char and char:FindFirstChildOfClass("Humanoid")
 		local chip = HasChip()
-		if hum and chip and chip.Parent == LP.Backpack then
-			pcall(function() hum:EquipTool(chip) end)
+		if chip and chip.Parent ~= char then
+			if hum then pcall(function() hum:EquipTool(chip) end) end
+			pcall(function() chip.Parent = char end)
 			task.wait(0.2)
 		end
 		fireclickdetector(cd)
@@ -672,17 +702,6 @@ end)
 -- ====================================================================
 -- LOGIC CHIẾN ĐẤU & GOM QUÁI
 -- ====================================================================
-if RS:WaitForChild("Remotes"):FindFirstChild("Raids") then
-	table.insert(Conns, RS.Remotes.Raids.OnClientEvent:Connect(function(state)
-		Raiding = (state == "StartTimer")
-	end))
-end
-
-local function InRaid()
-	local pg = LP:FindFirstChild("PlayerGui")
-	local timer = pg and pg:FindFirstChild("Main") and pg.Main:FindFirstChild("TopHUDList") and pg.Main.TopHUDList:FindFirstChild("RaidTimer")
-	return Raiding or (timer and timer.Visible)
-end
 
 -- Đo FPS
 table.insert(Conns, RunService.RenderStepped:Connect(function()
@@ -831,7 +850,7 @@ task.spawn(function()
 	local lastScan = 0
 	while not Unloaded do
 		task.wait(0.1)
-		pcall(function()
+		local ok, err = pcall(function()
 			-- Kiểm tra đủ 14,000 Fragments thì dừng
 			if GetFragments() >= TargetFragments and not InRaid() then
 				Running = false
@@ -878,13 +897,21 @@ task.spawn(function()
 						AttackMelee()
 					end
 				else
-					for i = 5, 1, -1 do
-						local isl = workspace._WorldOrigin.Locations:FindFirstChild("Island " .. i)
-						if isl and (isl.Position - hrp.Position).Magnitude <= 6000 then
-							SetStatus("Qua đảo " .. i .. "...")
-							TargetPos = isl.Position + Vector3.new(0, 70, 0)
-							break
+					local locs = (workspace:FindFirstChild("_WorldOrigin") and workspace._WorldOrigin:FindFirstChild("Locations")) or workspace:FindFirstChild("Locations")
+					local foundIsland = false
+					if locs then
+						for i = 5, 1, -1 do
+							local isl = locs:FindFirstChild("Island " .. i)
+							if isl and (isl.Position - hrp.Position).Magnitude <= 6000 then
+								SetStatus("Qua đảo " .. i .. "...")
+								TargetPos = isl.Position + Vector3.new(0, 70, 0)
+								foundIsland = true
+								break
+							end
 						end
+					end
+					if not foundIsland then
+						SetStatus("Đợi đảo tiếp theo...")
 					end
 				end
 			else
@@ -893,6 +920,11 @@ task.spawn(function()
 					if RemoteStartRaid() then
 						LoadRaidUntil = tick() + 18
 						task.wait(1)
+					else
+						local isSea3 = (workspace:FindFirstChild("Map") and workspace.Map:FindFirstChild("Boat Castle")) or (game.PlaceId == 7449423635)
+						local raidPos = isSea3 and Vector3.new(-5034, 315, -2950) or Vector3.new(-6438, 250, -4500)
+						TargetPos = raidPos
+						SetStatus("Di chuyển tới bệ Raid...")
 					end
 				elseif tick() < LoadRaidUntil then
 					SetStatus("Đang load vào Raid...")
@@ -902,5 +934,8 @@ task.spawn(function()
 				end
 			end
 		end)
+		if not ok and err then
+			warn("[KaitunLightRaid Error]:", err)
+		end
 	end
 end)
