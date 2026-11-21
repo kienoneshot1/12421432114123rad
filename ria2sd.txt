@@ -14,11 +14,13 @@ local CommF = RS:WaitForChild("Remotes"):WaitForChild("CommF_")
 local CommE = RS:WaitForChild("Remotes"):WaitForChild("CommE")
 local Net = RS:WaitForChild("Modules"):WaitForChild("Net")
 
--- Cấu hình
+-- ====================================================================
+-- CẤU HÌNH
+-- ====================================================================
 getgenv().Team = getgenv().Team or "Pirates"                   -- "Pirates" hoặc "Marines"
 getgenv().TargetFragments = getgenv().TargetFragments or 14000     -- Đủ 14k F thì dừng báo DONE
 getgenv().FpsBoost = (getgenv().FpsBoost ~= false)             -- Mặc định bật FPS Boost
-getgenv().FpsCap = getgenv().FpsCap or 15                      -- Set FPS cap 15
+getgenv().FpsCap = getgenv().FpsCap or 15                      -- Khóa FPS ở mức 15
 
 local TargetFragments = getgenv().TargetFragments
 local FpsCap = getgenv().FpsCap
@@ -28,7 +30,7 @@ local LoadRaidUntil, TargetPos, BringTarget, BringCF = 0, nil, nil, nil
 local Conns, LoDParts = {}, {}
 local CurrentStatus = "Khởi động..."
 local CurrentFPS = 15
-local FruitText = "Fruit <2M: Đang tải..."
+local FruitText = "Fruit <2M: Đang quét..."
 local FrameCount, LastFpsUpdate = 0, tick()
 
 -- Khóa FPS
@@ -39,15 +41,101 @@ local function LockFPS(cap)
 end
 LockFPS(FpsCap)
 
+-- Anti-AFK
+pcall(function()
+	local vu = game:GetService("VirtualUser")
+	LP.Idled:Connect(function()
+		vu:Button2Down(Vector2.zero, workspace.CurrentCamera.CFrame)
+		task.wait(1)
+		vu:Button2Up(Vector2.zero, workspace.CurrentCamera.CFrame)
+	end)
+end)
+
+-- Stream bệ Raid từ xa (Sea 2 & Sea 3)
+for _, pos in ipairs({Vector3.new(-6438, 250, -4500), Vector3.new(-5018, 315, -2828)}) do
+	local p = Instance.new("Part", workspace.CurrentCamera)
+	p.Anchored, p.CanCollide, p.Transparency, p.Size, p.CFrame = true, false, 1, Vector3.zero, CFrame.new(pos)
+	CS:AddTag(p, "LoDPosition")
+	table.insert(LoDParts, p)
+end
+
 -- ====================================================================
--- 0. HÀM CHECK FRAGMENTS & CHỌN TEAM
+-- BẢNG GIÁ FRUIT BLOX FRUITS (Dùng để chọn đúng trái < 2M rẻ nhất)
 -- ====================================================================
+local DefaultFruitPrices = {
+	["Rocket-Rocket"] = 5000, ["Spin-Spin"] = 7500, ["Blade-Blade"] = 30000,
+	["Spring-Spring"] = 60000, ["Bomb-Bomb"] = 80000, ["Smoke-Smoke"] = 100000,
+	["Spike-Spike"] = 180000, ["Flame-Flame"] = 250000, ["Falcon-Falcon"] = 300000,
+	["Ice-Ice"] = 350000, ["Sand-Sand"] = 420000, ["Dark-Dark"] = 500000,
+	["Diamond-Diamond"] = 600000, ["Light-Light"] = 650000, ["Rubber-Rubber"] = 750000,
+	["Barrier-Barrier"] = 800000, ["Ghost-Ghost"] = 940000, ["Magma-Magma"] = 960000,
+	["Quake-Quake"] = 1000000, ["Buddha-Buddha"] = 1200000, ["Love-Love"] = 1300000,
+	["Spider-Spider"] = 1500000, ["Sound-Sound"] = 1700000, ["Phoenix-Phoenix"] = 1800000,
+	["Portal-Portal"] = 1900000, ["Rumble-Rumble"] = 2100000, ["Pain-Pain"] = 2300000,
+	["Blizzard-Blizzard"] = 2400000, ["Gravity-Gravity"] = 2500000, ["Mammoth-Mammoth"] = 2700000,
+	["T-Rex-T-Rex"] = 2700000, ["Dough-Dough"] = 2800000, ["Shadow-Shadow"] = 2900000,
+	["Venom-Venom"] = 3000000, ["Control-Control"] = 3200000, ["Spirit-Spirit"] = 3400000,
+	["Dragon-Dragon"] = 3500000, ["Leopard-Leopard"] = 5000000, ["Kitsune-Kitsune"] = 8000000
+}
+
+local FruitPriceMap = {}
+for k, v in pairs(DefaultFruitPrices) do FruitPriceMap[k] = v end
+
+task.spawn(function()
+	pcall(function()
+		local catalog = CommF:InvokeServer("GetFruits", false)
+		if type(catalog) == "table" then
+			for _, f in pairs(catalog) do
+				if type(f) == "table" and f.Name and tonumber(f.Price) then
+					FruitPriceMap[f.Name] = tonumber(f.Price)
+				end
+			end
+		end
+	end)
+end)
+
+local function GetFruitPrice(name)
+	if not name then return 9999999 end
+	if FruitPriceMap[name] then return FruitPriceMap[name] end
+	local clean = name:gsub(" Fruit", "")
+	for k, v in pairs(FruitPriceMap) do
+		if string.find(k, clean) or string.find(name, k) then
+			return v
+		end
+	end
+	return 500000
+end
+
 local function GetFragments()
 	local data = LP:FindFirstChild("Data")
 	local f = data and data:FindFirstChild("Fragments")
 	return tonumber(f and f.Value) or 0
 end
 
+local function HasChip()
+	local c = LP.Character
+	local bp = LP:FindFirstChild("Backpack")
+	return (c and c:FindFirstChild("Special Microchip")) or (bp and bp:FindFirstChild("Special Microchip"))
+end
+
+-- Kiểm tra nếu người chơi ĐÃ CÓ sẵn trái trên người (Backpack hoặc Character)
+local function GetFruitInBag()
+	local char = LP.Character
+	for _, container in ipairs({ LP:FindFirstChild("Backpack"), char }) do
+		if container then
+			for _, t in ipairs(container:GetChildren()) do
+				if t:IsA("Tool") and (string.find(t.Name, "Fruit") or t.ToolTip == "Blox Fruit" or t:FindFirstChild("EatRemote")) then
+					return t
+				end
+			end
+		end
+	end
+	return nil
+end
+
+-- ====================================================================
+-- CHỌN TEAM (Tự động & UI Fallback)
+-- ====================================================================
 local function JoinTeam(teamName)
 	teamName = teamName or getgenv().Team or "Pirates"
 	if LP.Team and LP.Team.Name == teamName and LP.Character and LP.Character:FindFirstChild("HumanoidRootPart") then
@@ -93,29 +181,10 @@ local function JoinTeam(teamName)
 	return (LP.Team and LP.Team.Name == teamName)
 end
 
--- Tự động chọn team
 JoinTeam(getgenv().Team)
 
--- Anti-AFK
-pcall(function()
-	local vu = game:GetService("VirtualUser")
-	LP.Idled:Connect(function()
-		vu:Button2Down(Vector2.zero, workspace.CurrentCamera.CFrame)
-		task.wait(1)
-		vu:Button2Up(Vector2.zero, workspace.CurrentCamera.CFrame)
-	end)
-end)
-
--- Stream bệ Raid từ xa (Sea 2 & Sea 3)
-for _, pos in ipairs({Vector3.new(-6438, 250, -4500), Vector3.new(-5018, 315, -2828)}) do
-	local p = Instance.new("Part", workspace.CurrentCamera)
-	p.Anchored, p.CanCollide, p.Transparency, p.Size, p.CFrame = true, false, 1, Vector3.zero, CFrame.new(pos)
-	CS:AddTag(p, "LoDPosition")
-	table.insert(LoDParts, p)
-end
-
 -- ====================================================================
--- 1. UI NGẮN GỌN - HIỆU QUẢ (Đo FPS, F, Fruit, Nút chức năng)
+-- UI GỌN GÀNG (265 x 136 px, lưới 2x2)
 -- ====================================================================
 local function GetGuiParent()
 	local ok, res = pcall(gethui)
@@ -152,7 +221,6 @@ InfoLabel.Font, InfoLabel.TextSize, InfoLabel.TextColor3 = Enum.Font.Gotham, 11,
 InfoLabel.TextXAlignment, InfoLabel.TextYAlignment = Enum.TextXAlignment.Left, Enum.TextYAlignment.Top
 InfoLabel.TextWrapped = true
 
--- Row 1: Raid Toggle & Team Select
 local ToggleBtn = Instance.new("TextButton", Main)
 ToggleBtn.Size, ToggleBtn.Position = UDim2.new(0, 122, 0, 28), UDim2.new(0, 8, 0, 64)
 ToggleBtn.BackgroundColor3, ToggleBtn.Font, ToggleBtn.TextSize = Color3.fromRGB(46, 160, 67), Enum.Font.GothamBold, 12
@@ -165,7 +233,6 @@ TeamBtn.BackgroundColor3, TeamBtn.Font, TeamBtn.TextSize = Color3.fromRGB(190, 5
 TeamBtn.TextColor3, TeamBtn.Text = Color3.new(1, 1, 1), "Team: Pirates"
 Instance.new("UICorner", TeamBtn).CornerRadius = UDim.new(0, 6)
 
--- Row 2: FPS Boost & Unload
 local FpsBtn = Instance.new("TextButton", Main)
 FpsBtn.Size, FpsBtn.Position = UDim2.new(0, 122, 0, 28), UDim2.new(0, 8, 0, 98)
 FpsBtn.BackgroundColor3, FpsBtn.Font, FpsBtn.TextSize = Color3.fromRGB(30, 140, 180), Enum.Font.GothamBold, 12
@@ -210,7 +277,164 @@ local function UpdateFpsButton()
 end
 
 -- ====================================================================
--- 2. HỆ THỐNG FPS BOOST TỐI ƯU GỌN GÀNG (Set FPS Cap 15)
+-- HỆ THỐNG QUÉT & RÚT FRUIT RA RAID (Chuẩn xác 100% không bị kẹt)
+-- ====================================================================
+local function ScanFruitInventory()
+	local list, cheapKey, minPrice = {}, nil, 2000000
+
+	-- 1. Nếu trong người (Backpack / Character) đã có sẵn trái
+	local fruitInBag = GetFruitInBag()
+	if fruitInBag then
+		local p = GetFruitPrice(fruitInBag.Name)
+		local short = fruitInBag.Name:gsub(" Fruit", "")
+		table.insert(list, "[" .. short .. " (Trong người)]")
+		if p < minPrice then
+			minPrice = p
+			cheapKey = fruitInBag.Name
+		end
+	end
+
+	-- 2. Quét kho bằng ItemReplicationService + ItemConfig (chuẩn Vxeze / BNN)
+	pcall(function()
+		local IRS = require(RS:WaitForChild("ItemReplicationService"))
+		local IC = require(RS:WaitForChild("ItemConfig"))
+		local KEYS = IRS.KEYS
+		for _, item in IRS:GetItems(KEYS.QUANTITY) do
+			if item.Value and item.Value > 0 then
+				local ok, cfg = pcall(function() return IC.match(item.ItemId):unwrap() end)
+				if ok and cfg and cfg.Display and cfg.Display.Category == "Blox Fruit" then
+					local storageKey = (cfg.Index and cfg.Index.StorageKey) or cfg.Display.Name
+					local price = GetFruitPrice(storageKey)
+					if storageKey and price < 2000000 then
+						local shortName = storageKey:gsub("%-.*", ""):gsub(" Fruit", "")
+						table.insert(list, shortName .. " x" .. tostring(item.Value))
+						if price < minPrice then
+							minPrice = price
+							cheapKey = storageKey
+						end
+					end
+				end
+			end
+		end
+	end)
+
+	-- 3. Fallback: Nếu IRS không tìm thấy, gọi getInventory remote từ server
+	if not cheapKey then
+		pcall(function()
+			local inv = CommF:InvokeServer("getInventory")
+			if type(inv) == "table" then
+				for _, item in pairs(inv) do
+					if (item.Type == "Blox Fruit" or string.find(tostring(item.Name), "Fruit")) and item.Name then
+						local name = item.Name
+						local count = item.Count or item.Value or 1
+						local price = GetFruitPrice(name)
+						if price < 2000000 then
+							local shortName = name:gsub("%-.*", ""):gsub(" Fruit", "")
+							table.insert(list, shortName .. " x" .. tostring(count))
+							if price < minPrice then
+								minPrice = price
+								cheapKey = name
+							end
+						end
+					end
+				end
+			end
+		end)
+	end
+
+	FruitText = "Fruit <2M: " .. (#list > 0 and table.concat(list, ", ") or "Trống")
+	UpdateInfo()
+	return cheapKey
+end
+
+local function BuyLightChip()
+	if InRaid() or tick() < LoadRaidUntil or GetFragments() >= TargetFragments then
+		return false
+	end
+	if HasChip() then return true end
+
+	-- BƯỚC 1: Thử mua bằng Beli trước (100k Beli)
+	SetStatus("Mua chip Light (Beli)...")
+	pcall(function() CommF:InvokeServer("RaidsNpc", "Check") end)
+	task.wait(0.2)
+	pcall(function() CommF:InvokeServer("RaidsNpc", "Select", "Light") end)
+	task.wait(0.4)
+	if HasChip() then
+		SetStatus("Đã mua chip (Beli)!")
+		return true
+	end
+
+	-- BƯỚC 2: Kiểm tra nếu đã có Fruit trong người (Backpack hoặc Character)
+	local fruitInBag = GetFruitInBag()
+
+	-- BƯỚC 3: Nếu chưa có Fruit trong người, rút trái rẻ nhất < 2M từ kho
+	if not fruitInBag then
+		local cheapFruit = ScanFruitInventory()
+		if cheapFruit then
+			SetStatus("Lấy " .. cheapFruit .. " từ kho ra...")
+			pcall(function() CommF:InvokeServer("LoadFruit", cheapFruit) end)
+
+			-- Đợi trái xuất hiện trong Backpack / Character (tối đa 3 giây)
+			local waitStart = tick()
+			while tick() - waitStart < 3 do
+				task.wait(0.3)
+				fruitInBag = GetFruitInBag()
+				if fruitInBag then break end
+			end
+			ScanFruitInventory()
+		end
+	end
+
+	-- BƯỚC 4: Nếu có Fruit trong người, trang bị lên tay và đổi Chip
+	if fruitInBag then
+		SetStatus("Đổi " .. fruitInBag.Name .. " lấy chip Light...")
+		local char = LP.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		if hum and fruitInBag.Parent == LP.Backpack then
+			pcall(function() hum:EquipTool(fruitInBag) end)
+			task.wait(0.35)
+		end
+
+		pcall(function() CommF:InvokeServer("RaidsNpc", "Check") end)
+		task.wait(0.25)
+		pcall(function() CommF:InvokeServer("RaidsNpc", "Select", "Light") end)
+		task.wait(0.6)
+		ScanFruitInventory()
+	else
+		SetStatus("Hết Beli & không có Fruit < 2M!")
+		task.wait(2.5)
+		return false
+	end
+
+	return HasChip() ~= nil
+end
+
+local function RemoteStartRaid()
+	if GetFragments() >= TargetFragments then return false end
+	SetStatus("Start Raid từ xa...")
+	local map = workspace.Map
+	local pad = (map:FindFirstChild("CircleIsland") and map.CircleIsland:FindFirstChild("RaidSummon2"))
+		or (map:FindFirstChild("Boat Castle") and map["Boat Castle"]:FindFirstChild("RaidSummon2"))
+	local cd = pad and pad:FindFirstChildWhichIsA("ClickDetector", true)
+	if cd and fireclickdetector then
+		-- Trang bị Special Microchip lên tay nếu đang ở Backpack
+		local char = LP.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		local chip = HasChip()
+		if hum and chip and chip.Parent == LP.Backpack then
+			pcall(function() hum:EquipTool(chip) end)
+			task.wait(0.2)
+		end
+		fireclickdetector(cd)
+		task.wait(0.2)
+		fireclickdetector(cd)
+		return true
+	end
+	return false
+end
+
+-- ====================================================================
+-- FPS BOOST (Khóa 15 FPS, giảm tải CPU/GPU tối đa)
 -- ====================================================================
 local ZeroRange = NumberRange.new(0)
 local ZeroSequence = NumberSequence.new(1)
@@ -367,7 +591,7 @@ local function ApplyFpsBoost()
 	end
 end
 
--- Vòng lặp duy trì FPS Cap 15 và dọn dẹp VFX tạm
+-- Giữ FPS Cap 15 và dọn dẹp rác hiệu ứng
 task.spawn(function()
 	while not Unloaded do
 		task.wait(2)
@@ -394,7 +618,7 @@ UpdateInfo()
 if FpsBoostEnabled then ApplyFpsBoost() end
 
 -- ====================================================================
--- 3. XỬ LÝ SỰ KIỆN NÚT
+-- SỰ KIỆN NÚT BẤM
 -- ====================================================================
 local function CleanPhysics()
 	TargetPos = nil
@@ -446,7 +670,7 @@ UnloadBtn.MouseButton1Click:Connect(function()
 end)
 
 -- ====================================================================
--- 4. LOGIC RAID & COMBAT
+-- LOGIC CHIẾN ĐẤU & GOM QUÁI
 -- ====================================================================
 if RS:WaitForChild("Remotes"):FindFirstChild("Raids") then
 	table.insert(Conns, RS.Remotes.Raids.OnClientEvent:Connect(function(state)
@@ -524,72 +748,6 @@ task.spawn(function()
 	end
 end)
 
-local function HasChip()
-	local c = LP.Character
-	return (c and c:FindFirstChild("Special Microchip")) or LP.Backpack:FindFirstChild("Special Microchip")
-end
-
--- Quét trái dưới 2M Beli
-local function ScanFruitInventory()
-	local list, cheapKey, minPrice = {}, nil, 2000000
-	pcall(function()
-		local IRS = require(RS.ItemReplicationService)
-		local MATCH = require(RS.ItemConfig.Storage).match
-		for _, v in ipairs(IRS:GetItems(IRS.KEYS.QUANTITY)) do
-			if v.Value and v.Value > 0 then
-				local item = MATCH(v.ItemId)._ok
-				if item and item.Display.Category == "Blox Fruit" and item.Quality.MoneyPrice < 2000000 then
-					local key = item.Index.StorageKey
-					local shortName = (item.Display.Name or key):gsub(" Fruit", "")
-					table.insert(list, shortName .. " x" .. v.Value)
-					if item.Quality.MoneyPrice < minPrice then
-						minPrice = item.Quality.MoneyPrice
-						cheapKey = key
-					end
-				end
-			end
-		end
-	end)
-	FruitText = "Fruit <2M: " .. (#list > 0 and table.concat(list, ", ") or "Trống")
-	UpdateInfo()
-	return cheapKey
-end
-
-local function BuyLightChip()
-	if InRaid() or tick() < LoadRaidUntil or GetFragments() >= TargetFragments then return false end
-	local cheapFruit = ScanFruitInventory()
-	if HasChip() then return true end
-
-	SetStatus("Mua chip Light (Beli)...")
-	CommF:InvokeServer("RaidsNpc", "Select", "Light")
-	task.wait(0.3)
-	if HasChip() then return true end
-
-	if cheapFruit then
-		SetStatus("Đổi " .. cheapFruit .. " lấy chip Light...")
-		CommF:InvokeServer("LoadFruit", cheapFruit)
-		task.wait(0.35)
-		CommF:InvokeServer("RaidsNpc", "Select", "Light")
-		task.wait(0.3)
-		ScanFruitInventory()
-	end
-	return HasChip() ~= nil
-end
-
-local function RemoteStartRaid()
-	if GetFragments() >= TargetFragments then return false end
-	SetStatus("Start Raid từ xa...")
-	local map = workspace.Map
-	local pad = (map:FindFirstChild("CircleIsland") and map.CircleIsland:FindFirstChild("RaidSummon2"))
-		or (map:FindFirstChild("Boat Castle") and map["Boat Castle"]:FindFirstChild("RaidSummon2"))
-	local cd = pad and pad:FindFirstChildWhichIsA("ClickDetector", true)
-	if cd and fireclickdetector then
-		fireclickdetector(cd)
-		return true
-	end
-	return false
-end
-
 -- Gom quái
 local function BringMob(mob)
 	local mHrp = mob and mob:FindFirstChild("HumanoidRootPart")
@@ -665,7 +823,7 @@ local function AttackMelee()
 end
 
 -- ====================================================================
--- 5. VÒNG LẶP CHÍNH (MAIN LOOP)
+-- VÒNG LẶP CHÍNH (MAIN LOOP)
 -- ====================================================================
 ScanFruitInventory()
 
@@ -674,7 +832,7 @@ task.spawn(function()
 	while not Unloaded do
 		task.wait(0.1)
 		pcall(function()
-			-- Kiểm tra điều kiện hoàn thành 14,000 Fragments
+			-- Kiểm tra đủ 14,000 Fragments thì dừng
 			if GetFragments() >= TargetFragments and not InRaid() then
 				Running = false
 				SetStatus("DONE (Đã đủ 14k F!)")
@@ -739,7 +897,7 @@ task.spawn(function()
 				elseif tick() < LoadRaidUntil then
 					SetStatus("Đang load vào Raid...")
 				elseif not BuyLightChip() then
-					SetStatus("Hết Beli & Fruit dưới 2M!")
+					SetStatus("Hết Beli & không có Fruit < 2M!")
 					task.wait(3)
 				end
 			end
